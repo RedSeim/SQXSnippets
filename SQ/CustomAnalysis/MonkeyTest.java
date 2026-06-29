@@ -36,10 +36,12 @@ public class MonkeyTest extends CustomAnalysisMethod {
     @Override
     public ArrayList<ResultsGroup> processDatabank(String projectName, String task, String databankName, ArrayList<ResultsGroup> databankRG) throws Exception {
         // Configuration defaults — can be overridden via Input Args field in the project task
-        // as "numMonkeys,percentile" e.g. "500,95"
+        // as "numMonkeys,percentile,period" e.g. "500,95,OOS" (period: FULL | IS | OOS, default FULL)
         int numMonkeys = 500;
         double percentile = 95.0;
-        
+        byte sampleType = SampleTypes.FullSample;
+        String sampleLabel = "FULL";
+
         try {
             String inputArgs = this.getInputArgs();
             if (inputArgs != null && !inputArgs.trim().isEmpty()) {
@@ -50,9 +52,24 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 if (args.length >= 2 && !args[1].trim().isEmpty()) {
                     percentile = Double.parseDouble(args[1].trim());
                 }
+                if (args.length >= 3 && !args[2].trim().isEmpty()) {
+                    String periodArg = args[2].trim().toUpperCase();
+                    if ("IS".equals(periodArg)) {
+                        sampleType = SampleTypes.InSample;
+                        sampleLabel = "IS";
+                    } else if ("OOS".equals(periodArg)) {
+                        sampleType = SampleTypes.OutOfSample;
+                        sampleLabel = "OOS";
+                    } else if ("FULL".equals(periodArg)) {
+                        sampleType = SampleTypes.FullSample;
+                        sampleLabel = "FULL";
+                    } else {
+                        Log.warn("MonkeyTest: unrecognized period argument '" + periodArg + "'. Valid values: FULL, IS, OOS. Defaulting to FULL.");
+                    }
+                }
             }
         } catch (Exception e) {
-            Log.warn("Could not read input args, using defaults (500 monkeys, 95%). Reason: " + e.getMessage());
+            Log.warn("Could not read input args, using defaults (500 monkeys, 95%, FULL). Reason: " + e.getMessage());
         }
 
         Random rng = new Random();
@@ -63,12 +80,13 @@ public class MonkeyTest extends CustomAnalysisMethod {
             String status = "FAILED";
             
             java.io.PrintWriter csvWriter = null;
+            java.io.PrintWriter metaWriter = null;
             try {
                 Result mainResult = rgClone.mainResult();
                 String mainResultKey = rgClone.getMainResultKey();
                 
                 // Retrieve all trades
-                OrdersList orders = rgClone.orders().filterWithClone(mainResultKey, Directions.Both, SampleTypes.FullSample);
+                OrdersList orders = rgClone.orders().filterWithClone(mainResultKey, Directions.Both, sampleType);
                 
                 // Get the symbol and timeframe from main result key, e.g. "Main: USATECHIDXUSD_ftmo/M15"
                 String symbolConnection = "";
@@ -90,6 +108,11 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 ArrayList<Candle> candles = loadCandles(symbolConnection, timeframe, mainResult);
                 
                 if (orders.size() < 20) {
+                    if (orders.size() == 0 && sampleType != SampleTypes.FullSample) {
+                        Log.warn("MonkeyTest: strategy [" + rgClone.getName() + "] has no trades in the " + sampleLabel + " period. Verify that the last backtest has that sample period (IS/OOS) configured. -> LOW TRADES.");
+                    } else {
+                        Log.warn("MonkeyTest: strategy [" + rgClone.getName() + "] has too few trades in the " + sampleLabel + " period (" + orders.size() + " trades, minimum 20). -> LOW TRADES.");
+                    }
                     status = "LOW TRADES";
                 } else if (candles == null || candles.isEmpty()) {
                     status = "FAILED (NO DATA)";
@@ -345,6 +368,27 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     } else {
                         status = "FAILED";
                     }
+
+                    // Write sidecar fingerprint for ResultsPlugin temporal verification
+                    try {
+                        String metaPath = "user/exports/MonkeyTest/" + rgClone.getName() + "_monkey_simulation_data.meta.json";
+                        metaWriter = new java.io.PrintWriter(new java.io.FileWriter(metaPath));
+                        String escapedName = rgClone.getName().replace("\\", "\\\\").replace("\"", "\\\"");
+                        metaWriter.println("{");
+                        metaWriter.println("  \"strategyName\": \"" + escapedName + "\",");
+                        metaWriter.println("  \"period\": \"" + sampleLabel + "\",");
+                        metaWriter.println("  \"tradeFromMs\": " + tMin + ",");
+                        metaWriter.println("  \"tradeToMs\": " + tMax + ",");
+                        metaWriter.println("  \"numTrades\": " + orders.size() + ",");
+                        metaWriter.println("  \"realProfit\": " + String.format(java.util.Locale.US, "%.2f", realProfit) + ",");
+                        metaWriter.println("  \"percentile\": " + String.format(java.util.Locale.US, "%.1f", percentile) + ",");
+                        metaWriter.println("  \"numMonkeys\": " + numMonkeys + ",");
+                        metaWriter.println("  \"generatedAtUtc\": " + System.currentTimeMillis() + ",");
+                        metaWriter.println("  \"source\": \"CustomAnalysis\"");
+                        metaWriter.println("}");
+                    } catch (Exception metaEx) {
+                        Log.warn("MonkeyTest: could not write .meta.json sidecar for " + rgClone.getName() + ": " + metaEx.getMessage());
+                    }
                 }
             } catch (Exception e) {
                 status = "ERROR";
@@ -352,6 +396,9 @@ public class MonkeyTest extends CustomAnalysisMethod {
             } finally {
                 if (csvWriter != null) {
                     try { csvWriter.close(); } catch (Exception ex) {}
+                }
+                if (metaWriter != null) {
+                    try { metaWriter.close(); } catch (Exception ex) {}
                 }
             }
             

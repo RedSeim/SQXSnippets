@@ -13,7 +13,7 @@ public class MonkeyTestColumn extends DatabankColumn {
               ValueTypes.Minimize, 
               0, 0, 0);
         setWidth(100);
-        setTooltip("Monkey Test result: PASSED, FAILED or LOW TRADES");
+        setTooltip("Monkey Test result: PASSED, FAILED, LOW TRADES, FAILED (NO DATA) or ERROR");
     }
 
     @Override

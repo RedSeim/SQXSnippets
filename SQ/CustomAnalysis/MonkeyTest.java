@@ -87,7 +87,19 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 
                 // Retrieve all trades
                 OrdersList orders = rgClone.orders().filterWithClone(mainResultKey, Directions.Both, sampleType);
-                
+
+                // Filtered trade list: exclude balance orders and zero-length/zero-PL pseudo-trades.
+                // Used consistently everywhere below so numTrades, curve length, and the
+                // LOW TRADES threshold all agree with each other.
+                ArrayList<Order> tradeOrders = new ArrayList<>();
+                for (int i = 0; i < orders.size(); i++) {
+                    Order o = orders.get(i);
+                    if (o.isBalanceOrder()) continue;
+                    if (o.OpenPrice == o.ClosePrice && Math.abs(o.PL) < 1e-9) continue;
+                    tradeOrders.add(o);
+                }
+                int tradeCount = tradeOrders.size();
+
                 // Get the symbol and timeframe from main result key, e.g. "Main: USATECHIDXUSD_ftmo/M15"
                 String symbolConnection = "";
                 String timeframe = "";
@@ -107,11 +119,11 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 // Load candles from .dat file
                 ArrayList<Candle> candles = loadCandles(symbolConnection, timeframe, mainResult);
                 
-                if (orders.size() < 20) {
-                    if (orders.size() == 0 && sampleType != SampleTypes.FullSample) {
+                if (tradeCount < 20) {
+                    if (tradeCount == 0 && sampleType != SampleTypes.FullSample) {
                         Log.warn("MonkeyTest: strategy [" + rgClone.getName() + "] has no trades in the " + sampleLabel + " period. Verify that the last backtest has that sample period (IS/OOS) configured. -> LOW TRADES.");
                     } else {
-                        Log.warn("MonkeyTest: strategy [" + rgClone.getName() + "] has too few trades in the " + sampleLabel + " period (" + orders.size() + " trades, minimum 20). -> LOW TRADES.");
+                        Log.warn("MonkeyTest: strategy [" + rgClone.getName() + "] has too few trades in the " + sampleLabel + " period (" + tradeCount + " trades, minimum 20). -> LOW TRADES.");
                     }
                     status = "LOW TRADES";
                 } else if (candles == null || candles.isEmpty()) {
@@ -125,9 +137,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     boolean hasFriday = false;
                     int FridayExitHour = 21;
                     int FridayExitMinute = 0;
-                    for (int i = 0; i < orders.size(); i++) {
-                        Order o = orders.get(i);
-                        if (o.isBalanceOrder()) continue;
+                    for (int i = 0; i < tradeCount; i++) {
+                        Order o = tradeOrders.get(i);
                         if (o.CloseType == 14 || o.CloseType == 16 || o.CloseType == 55) {
                             hasFriday = true;
                             java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
@@ -141,28 +152,27 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     // Find bar index range of trades
                     long tMin = Long.MAX_VALUE;
                     long tMax = Long.MIN_VALUE;
-                    for (int i = 0; i < orders.size(); i++) {
-                        Order o = orders.get(i);
-                        if (o.isBalanceOrder()) continue;
+                    for (int i = 0; i < tradeCount; i++) {
+                        Order o = tradeOrders.get(i);
                         if (o.OpenTime < tMin) tMin = o.OpenTime;
                         if (o.CloseTime > tMax) tMax = o.CloseTime;
                     }
-                    
+
                     int idxMin = findBarIndex(candles, tMin);
                     int idxMax = findBarIndex(candles, tMax);
-                    
+
                     if (idxMin == -1 || idxMax == -1 || idxMax <= idxMin) {
                         idxMin = 0;
                         idxMax = barsCount - 1;
                     }
-                    
+
                     int M = idxMax - idxMin + 1;
-                    
-                    // Pre-align original orders to bar offsets
-                    int[] t_i = new int[orders.size()];
-                    int[] r_i = new int[orders.size()];
-                    for (int i = 0; i < orders.size(); i++) {
-                        Order o = orders.get(i);
+
+                    // Pre-align trade orders to bar offsets
+                    int[] t_i = new int[tradeCount];
+                    int[] r_i = new int[tradeCount];
+                    for (int i = 0; i < tradeCount; i++) {
+                        Order o = tradeOrders.get(i);
                         int originalIdx = findBarIndex(candles, o.OpenTime);
                         if (originalIdx < idxMin || originalIdx > idxMax) {
                             originalIdx = idxMin + (idxMax - idxMin) / 2;
@@ -170,45 +180,42 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         t_i[i] = originalIdx;
                         r_i[i] = originalIdx - idxMin;
                     }
-                    
-                    // Calculate real strategy net profit
+
+                    // Initial balance and real strategy net profit, derived from tradeOrders
+                    double initialBalance = tradeOrders.get(0).AccountBalance - tradeOrders.get(0).PL;
                     double realProfit = 0;
-                    for (int i = 0; i < orders.size(); i++) {
-                        realProfit += orders.get(i).PL;
+                    for (int i = 0; i < tradeCount; i++) {
+                        realProfit += tradeOrders.get(i).PL;
                     }
 
-                    // Open CSV writer for monkey simulation data
-                    new java.io.File("user/extend/ResultsPlugins/DatabankMonkeyTest/cache").mkdirs();
-                    String csvPath = "user/extend/ResultsPlugins/DatabankMonkeyTest/cache/" + rgClone.getName() + "_monkey_simulation_data.csv";
-                    csvWriter = new java.io.PrintWriter(new java.io.FileWriter(csvPath));
-                    csvWriter.println("\"Monkey ID\";\"Ticket\";\"Symbol\";\"Type\";\"Open time\";\"Open price\";\"Size\";\"Close time\";\"Close price\";\"Profit/Loss\";\"Balance\";\"Sample type\";\"Close type\";\"MAE ($)\";\"MFE ($)\";\"Time in trade\";\"Comment\";\"Comm/Swap\";\"Stop Loss price level\";\"Profit/Loss\";\"Profit/Loss Pips\";\"Balance\";\"Profit Target price level\"");
-
-                    // Run Monte Carlo simulations
+                    // Run Monte Carlo simulations, keeping each monkey's full equity curve
                     double[] monkeyProfits = new double[numMonkeys];
-                    
+                    double[][] curves = new double[numMonkeys][];
+
                     for (int m = 0; m < numMonkeys; m++) {
                         int shift = rng.nextInt(M - 1) + 1;
-                        double runningBalance = orders.get(0).AccountBalance - orders.get(0).PL;
-                        
-                        for (int k = 0; k < orders.size(); k++) {
-                            Order o = orders.get(k);
-                            if (o.isBalanceOrder()) continue;
-                            
+                        double runningBalance = initialBalance;
+                        double[] curve = new double[tradeCount + 1];
+                        curve[0] = initialBalance;
+
+                        for (int k = 0; k < tradeCount; k++) {
+                            Order o = tradeOrders.get(k);
+
                             // Circular shift relative bar index
                             int r_prime = (r_i[k] - shift) % M;
                             if (r_prime < 0) r_prime += M;
                             int t_prime = idxMin + r_prime;
-                            
+
                             double entryPrice = candles.get(t_prime).open;
-                            
+
                             // Parse original SL / TP relative percentages
                             boolean hasSL = o.StopLoss > 0 && o.StopLoss != o.OpenPrice && o.StopLoss != Order.NOT_DEFINED;
                             boolean hasTP = o.TakeProfit > 0 && o.TakeProfit != o.OpenPrice && o.TakeProfit != Order.NOT_DEFINED;
-                            
+
                             double sl_pct = hasSL ? Math.abs(o.StopLoss - o.OpenPrice) / o.OpenPrice : 0.0;
                             double tp_pct = hasTP ? Math.abs(o.TakeProfit - o.OpenPrice) / o.OpenPrice : 0.0;
                             int direction = o.isShort() ? -1 : 1;
-                            
+
                             double slPrice = -1;
                             double tpPrice = -1;
                             if (hasSL) {
@@ -217,177 +224,195 @@ public class MonkeyTest extends CustomAnalysisMethod {
                             if (hasTP) {
                                 tpPrice = direction == 1 ? entryPrice * (1.0 + tp_pct) : entryPrice * (1.0 - tp_pct);
                             }
-                            
+
                             double exitPrice = -1;
                             long exitTime = 0;
-                            String closeTypeStr = "Time exit";
-                            
+
                             int maxBars = holdingBars(o, tfMs);
                             boolean useBarLimit = !hasSL && !hasTP;
                             int maxLoopBars = useBarLimit ? maxBars : (barsCount - t_prime);
                             if (maxLoopBars <= 0) maxLoopBars = 1;
-                            
-                            double worstLow = entryPrice;
-                            double bestHigh = entryPrice;
-                            
+
                             // Step-by-step path evaluation
                             for (int b = 0; b < maxLoopBars; b++) {
                                 int candleIdx = (t_prime + b) % barsCount;
                                 Candle c = candles.get(candleIdx);
-                                
-                                if (c.low < worstLow) worstLow = c.low;
-                                if (c.high > bestHigh) bestHigh = c.high;
-                                
+
                                 if (hasFriday && isAfterFridayExit(c.time, FridayExitHour, FridayExitMinute)) {
                                     exitPrice = c.open;
                                     exitTime = c.time;
-                                    closeTypeStr = "Friday Exit";
                                     break;
                                 }
 
                                 double low = c.low;
                                 double high = c.high;
-                                
+
                                 if (direction == 1) { // Long
                                     if (hasSL && low <= slPrice) {
                                         exitPrice = slPrice;
                                         exitTime = c.time;
-                                        closeTypeStr = "SL";
                                         break;
                                     }
                                     if (hasTP && high >= tpPrice) {
                                         exitPrice = tpPrice;
                                         exitTime = c.time;
-                                        closeTypeStr = "PT";
                                         break;
                                     }
                                 } else { // Short
                                     if (hasSL && high >= slPrice) {
                                         exitPrice = slPrice;
                                         exitTime = c.time;
-                                        closeTypeStr = "SL";
                                         break;
                                     }
                                     if (hasTP && low <= tpPrice) {
                                         exitPrice = tpPrice;
                                         exitTime = c.time;
-                                        closeTypeStr = "PT";
                                         break;
                                     }
                                 }
                             }
-                            
+
                             if (exitPrice == -1) {
                                 int exitIdx = (t_prime + maxLoopBars - 1) % barsCount;
                                 exitPrice = candles.get(exitIdx).close;
                                 exitTime = candles.get(exitIdx).time;
-                                if (candles.get(exitIdx).low < worstLow) worstLow = candles.get(exitIdx).low;
-                                if (candles.get(exitIdx).high > bestHigh) bestHigh = candles.get(exitIdx).high;
                             }
-                            
+
                             // P&L lot scaling and pip mapping
                             double origPriceDiff = o.ClosePrice - o.OpenPrice;
                             double grossOrigPL = o.PL - o.CommSwap;
                             double pipMult = Math.abs(origPriceDiff) > 1e-8 ? grossOrigPL / (o.Size * origPriceDiff) : 0.0;
-                            
+
                             double priceCorrection = hasSL ? (o.OpenPrice / entryPrice) : 1.0;
                             double monkeySize = o.Size * priceCorrection;
                             if (monkeySize < 0.01) monkeySize = 0.01;
-                            
+
                             double simPriceDiff = exitPrice - entryPrice;
                             double grossPL = monkeySize * simPriceDiff * pipMult;
-                            
+
                             double monkeyCommSwap = (o.Size > 1e-9) ? (o.CommSwap / o.Size) * monkeySize : 0.0;
                             double tradePL = grossPL + monkeyCommSwap;
-                            
+
                             runningBalance += tradePL;
-                            
-                            // MAE/MFE calculation
-                            double moneyAtLow = monkeySize * (worstLow - entryPrice) * pipMult;
-                            double moneyAtHigh = monkeySize * (bestHigh - entryPrice) * pipMult;
-                            double maeMoney = Math.min(0.0, Math.min(moneyAtLow, moneyAtHigh));
-                            double mfeMoney = Math.max(0.0, Math.max(moneyAtLow, moneyAtHigh));
-                            
-                            // Pips calculation
-                            double plPips = 0.0;
-                            double tickSize = 0.0001;
-                            if (Math.abs(o.PipsPL) > 1e-9 && Math.abs(origPriceDiff) > 1e-8) {
-                                double pipsPerPriceUnit = o.PipsPL / origPriceDiff;
-                                plPips = simPriceDiff * pipsPerPriceUnit;
-                            } else {
-                                plPips = simPriceDiff / tickSize;
-                            }
-                            
-                            // Formatting strings for CSV row
-                            String openTimeStr = fmtDate(candles.get(t_prime).time);
-                            String closeTimeStr = fmtDate(exitTime);
-                            String durStr = formatDuration(exitTime - candles.get(t_prime).time);
-                            
-                            String typeStr = o.isShort() ? "Sell" : "Buy";
-                            String sampleTypeStr = (o.SampleType == 10) ? "IST" : "OOT";
-                            
-                            csvWriter.println(String.format(java.util.Locale.US,
-                                "%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s",
-                                fmtText(String.valueOf(m + 1)), // Monkey ID
-                                fmtText(String.format("M%d_%d", m + 1, o.Ticket)), // Ticket
-                                fmtText(symbolConnection), // Symbol
-                                fmtText(typeStr), // Type
-                                openTimeStr, // Open time
-                                fmtPrice(entryPrice), // Open price
-                                fmtPrice(monkeySize), // Size
-                                closeTimeStr, // Close time
-                                fmtPrice(exitPrice), // Close price
-                                fmtMoney(tradePL), // Profit/Loss
-                                fmtMoney(runningBalance), // Balance
-                                fmtText(sampleTypeStr), // Sample type
-                                fmtText(closeTypeStr), // Close type
-                                fmtMoney(maeMoney), // MAE ($)
-                                fmtMoney(mfeMoney), // MFE ($)
-                                durStr, // Time in trade
-                                fmtText(String.format("Monkey %d", m + 1)), // Comment
-                                fmtMoney(monkeyCommSwap), // Comm/Swap
-                                fmtLevel(slPrice > 0 ? slPrice : 0.0), // Stop Loss price level
-                                fmtMoney(tradePL), // Profit/Loss (duplicate)
-                                fmtMoney(plPips), // Profit/Loss Pips
-                                fmtMoney(runningBalance), // Balance (duplicate)
-                                fmtLevel(tpPrice > 0 ? tpPrice : 0.0) // Profit Target price level
-                            ));
+                            curve[k + 1] = runningBalance;
                         }
-                        
-                        monkeyProfits[m] = runningBalance - (orders.get(0).AccountBalance - orders.get(0).PL);
+
+                        curves[m] = curve;
+                        monkeyProfits[m] = curve[tradeCount] - curve[0];
                     }
-                    
-                    // Sort profits to compute percentile cutoff
-                    Arrays.sort(monkeyProfits);
+
+                    // Statistics over all N monkeys (mean/std/zScore/threshold/rankPercentile/status)
+                    double sum = 0;
+                    for (double p : monkeyProfits) sum += p;
+                    double mean = sum / numMonkeys;
+
+                    double sqDiffSum = 0;
+                    for (double p : monkeyProfits) sqDiffSum += (p - mean) * (p - mean);
+                    double variance = numMonkeys > 1 ? sqDiffSum / (numMonkeys - 1) : 0.0;
+                    double std = Math.sqrt(variance);
+
+                    double zScore = std > 0 ? (realProfit - mean) / std : 0.0;
+
+                    double[] sortedProfits = monkeyProfits.clone();
+                    Arrays.sort(sortedProfits);
                     int thresholdIndex = (int) Math.floor(numMonkeys * (percentile / 100.0));
+                    if (thresholdIndex < 0) thresholdIndex = 0;
                     if (thresholdIndex >= numMonkeys) thresholdIndex = numMonkeys - 1;
-                    double thresholdVal = monkeyProfits[thresholdIndex];
-                    
+                    double thresholdVal = sortedProfits[thresholdIndex];
+
+                    int beaten = 0;
+                    for (double p : monkeyProfits) if (p < realProfit) beaten++;
+                    double rankPercentile = (beaten / (double) numMonkeys) * 100.0;
+
                     if (realProfit > thresholdVal) {
                         status = "PASSED";
                     } else {
                         status = "FAILED";
                     }
 
-                    // Write sidecar fingerprint for ResultsPlugin temporal verification
+                    // Write cache artifacts (wide CSV with representative equity curves + meta.json v2)
                     try {
-                        String metaPath = "user/extend/ResultsPlugins/DatabankMonkeyTest/cache/" + rgClone.getName() + "_monkey_simulation_data.meta.json";
-                        metaWriter = new java.io.PrintWriter(new java.io.FileWriter(metaPath));
+                        java.io.File cacheDir = new java.io.File("user/extend/ResultsPlugins/DatabankMonkeyTest/cache");
+                        cacheDir.mkdirs();
+
+                        // Rank monkeys by profit without losing the index <-> curve correspondence
+                        final double[] profitsForSort = monkeyProfits;
+                        Integer[] order = new Integer[numMonkeys];
+                        for (int i = 0; i < numMonkeys; i++) order[i] = i;
+                        Arrays.sort(order, new java.util.Comparator<Integer>() {
+                            public int compare(Integer a, Integer b) {
+                                return Double.compare(profitsForSort[a], profitsForSort[b]);
+                            }
+                        });
+
+                        // Select up to 50 representative curves: min, max, and uniform percentile steps
+                        int numCurves = Math.min(50, numMonkeys);
+                        java.util.TreeSet<Integer> positions = new java.util.TreeSet<>();
+                        positions.add(0);
+                        positions.add(numMonkeys - 1);
+                        for (int k = 1; k <= numCurves - 2; k++) {
+                            int pos = (int) Math.round(k * (numMonkeys - 1) / (double) (numCurves - 1));
+                            positions.add(pos);
+                        }
+
+                        String csvPath = cacheDir.getPath() + "/" + rgClone.getName() + "_monkey_simulation_data.csv";
+                        csvWriter = new java.io.PrintWriter(new java.io.OutputStreamWriter(
+                            new java.io.FileOutputStream(csvPath), java.nio.charset.StandardCharsets.UTF_8));
+
+                        StringBuilder header = new StringBuilder("monkey_id");
+                        for (int b = 0; b <= tradeCount; b++) header.append(";b").append(b);
+                        csvWriter.println(header.toString());
+
+                        int qLabel = 1;
+                        for (int pos : positions) {
+                            String label;
+                            if (pos == 0) label = "min";
+                            else if (pos == numMonkeys - 1) label = "max";
+                            else label = String.format("q%02d", qLabel++);
+
+                            double[] curve = curves[order[pos]];
+                            StringBuilder row = new StringBuilder(label);
+                            for (int b = 0; b <= tradeCount; b++) {
+                                row.append(';').append(String.format(java.util.Locale.US, "%.2f", curve[b]));
+                            }
+                            csvWriter.println(row.toString());
+                        }
+
+                        String metaPath = cacheDir.getPath() + "/" + rgClone.getName() + "_monkey_simulation_data.meta.json";
+                        metaWriter = new java.io.PrintWriter(new java.io.OutputStreamWriter(
+                            new java.io.FileOutputStream(metaPath), java.nio.charset.StandardCharsets.UTF_8));
                         String escapedName = rgClone.getName().replace("\\", "\\\\").replace("\"", "\\\"");
+
+                        StringBuilder profitsArr = new StringBuilder("[");
+                        for (int i = 0; i < sortedProfits.length; i++) {
+                            if (i > 0) profitsArr.append(",");
+                            profitsArr.append(String.format(java.util.Locale.US, "%.2f", sortedProfits[i]));
+                        }
+                        profitsArr.append("]");
+
                         metaWriter.println("{");
+                        metaWriter.println("  \"schemaVersion\": 2,");
                         metaWriter.println("  \"strategyName\": \"" + escapedName + "\",");
                         metaWriter.println("  \"period\": \"" + sampleLabel + "\",");
                         metaWriter.println("  \"tradeFromMs\": " + tMin + ",");
                         metaWriter.println("  \"tradeToMs\": " + tMax + ",");
-                        metaWriter.println("  \"numTrades\": " + orders.size() + ",");
-                        metaWriter.println("  \"realProfit\": " + String.format(java.util.Locale.US, "%.2f", realProfit) + ",");
-                        metaWriter.println("  \"percentile\": " + String.format(java.util.Locale.US, "%.1f", percentile) + ",");
+                        metaWriter.println("  \"numTrades\": " + tradeCount + ",");
                         metaWriter.println("  \"numMonkeys\": " + numMonkeys + ",");
+                        metaWriter.println("  \"percentile\": " + String.format(java.util.Locale.US, "%.1f", percentile) + ",");
+                        metaWriter.println("  \"initialBalance\": " + String.format(java.util.Locale.US, "%.2f", initialBalance) + ",");
+                        metaWriter.println("  \"realProfit\": " + String.format(java.util.Locale.US, "%.2f", realProfit) + ",");
+                        metaWriter.println("  \"monkeyThreshold\": " + String.format(java.util.Locale.US, "%.2f", thresholdVal) + ",");
+                        metaWriter.println("  \"meanMonkey\": " + String.format(java.util.Locale.US, "%.2f", mean) + ",");
+                        metaWriter.println("  \"stdMonkey\": " + String.format(java.util.Locale.US, "%.2f", std) + ",");
+                        metaWriter.println("  \"zScore\": " + String.format(java.util.Locale.US, "%.2f", zScore) + ",");
+                        metaWriter.println("  \"rankPercentile\": " + String.format(java.util.Locale.US, "%.2f", rankPercentile) + ",");
+                        metaWriter.println("  \"status\": \"" + status + "\",");
+                        metaWriter.println("  \"monkeyProfits\": " + profitsArr.toString() + ",");
                         metaWriter.println("  \"generatedAtUtc\": " + System.currentTimeMillis() + ",");
                         metaWriter.println("  \"source\": \"CustomAnalysis\"");
                         metaWriter.println("}");
-                    } catch (Exception metaEx) {
-                        Log.warn("MonkeyTest: could not write .meta.json sidecar for " + rgClone.getName() + ": " + metaEx.getMessage());
+                    } catch (Exception cacheEx) {
+                        Log.warn("MonkeyTest: could not write cache artifacts for " + rgClone.getName() + ": " + cacheEx.getMessage());
                     }
                 }
             } catch (Exception e) {
@@ -586,54 +611,4 @@ public class MonkeyTest extends CustomAnalysisMethod {
         return false;
     }
 
-    private String fmtText(String val) {
-        if (val == null) return "\"\"";
-        return "\"" + val.replace("\"", "\"\"") + "\"";
-    }
-
-    private String fmtPrice(double val) {
-        String strVal = String.format(java.util.Locale.US, "%.5f", val);
-        if (strVal.contains(".")) {
-            strVal = strVal.replaceAll("0+$", "").replaceAll("\\.$", "");
-        }
-        return "\"" + strVal + "\"";
-    }
-
-    private String fmtMoney(double val) {
-        return "\"" + String.format(java.util.Locale.US, "%.2f", val).replace(".", ",") + "\"";
-    }
-
-    private String fmtLevel(double val) {
-        return "\"" + String.format(java.util.Locale.US, "%.5f", val).replace(".", ",") + "\"";
-    }
-
-    private String fmtDate(long timestamp) {
-        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy.MM.dd HH:mm:ss");
-        sdf.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
-        return fmtText(sdf.format(new java.util.Date(timestamp)));
-    }
-
-    private String formatDuration(long ms) {
-        if (ms <= 0) return "\"0s\"";
-        long totalSecs = ms / 1000;
-        long days = totalSecs / (24 * 3600);
-        totalSecs %= (24 * 3600);
-        long hours = totalSecs / 3600;
-        totalSecs %= 3600;
-        long mins = totalSecs / 60;
-        long secs = totalSecs % 60;
-        
-        ArrayList<String> parts = new ArrayList<>();
-        if (days > 0) parts.add(days + "d");
-        if (hours > 0) parts.add(hours + "h");
-        if (mins > 0) parts.add(mins + "m");
-        if (parts.isEmpty() || secs > 0) parts.add(secs + "s");
-        
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.size(); i++) {
-            sb.append(parts.get(i));
-            if (i < parts.size() - 1) sb.append(" ");
-        }
-        return fmtText(sb.toString());
-    }
 }

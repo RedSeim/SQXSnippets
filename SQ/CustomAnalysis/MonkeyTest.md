@@ -73,16 +73,26 @@ The snippet writes outcomes directly to the strategy metadata to populate databa
   * Draws a **green PASSED** (`Passed`) if the test passes (and no other filters failed).
   * Draws a **red FAILED** (`Failed Monkey Test`) if the strategy fails, allowing SQX's automated workflow to discard it.
 
-### CSV Debug Log & Sidecar Fingerprint
-For deep-dive validation and balance curve plotting, the simulation results of all monkeys are exported to:
-`user/exports/MonkeyTest/[StrategyName]_monkey_simulation_data.csv`
+### Cache Files for the Databank Monkey Test ResultsPlugin (v2)
+To let the **Databank Monkey Test** ResultsPlugin auto-display the Gaussian bell curve and equity comparison charts without recalculating, the snippet writes two cache artifacts per strategy into:
+`user/extend/ResultsPlugins/DatabankMonkeyTest/cache/`
 
-This file contains 23 columns (including timestamps, entry/exit prices, MAE, MFE, commissions, swap, SL/PT levels, and cumulative balance curves) and is formatted to be fully compatible with the HTML/JS Results Plugin tab for instant visual charting.
+* **`[StrategyName]_monkey_simulation_data.csv`** — a compact "wide" CSV with up to 50 representative monkey equity curves (not a full trade-level dump). Each row is one monkey's full balance path: `monkey_id;b0;b1;...;bT` (semicolon-separated, dot decimals, no quotes, UTF-8 without BOM). Rows are selected from the full distribution of monkey profits — the lowest (`min`), the highest (`max`), and up to 48 intermediate curves spaced evenly by percentile rank — so the plugin can plot a representative "spaghetti" of equity curves against the real strategy's equity, sourced separately from `GET_ORDERS`.
+* **`[StrategyName]_monkey_simulation_data.meta.json`** — all the scalar KPIs plus the full array of monkey profits, schema version 2:
 
-Alongside the CSV, the snippet also writes a **sidecar fingerprint file**:
-`user/exports/MonkeyTest/[StrategyName]_monkey_simulation_data.meta.json`
+  | Field | Description |
+  | :--- | :--- |
+  | `schemaVersion` | Always `2`. Marks this as the current cache format. |
+  | `strategyName`, `period` | Strategy name and sample period (`FULL`/`IS`/`OOS`) used for the test. |
+  | `tradeFromMs`, `tradeToMs` | Epoch ms (UTC) range of the real trades used — lets the plugin verify the cache matches the strategy currently loaded before trusting it. |
+  | `numTrades`, `numMonkeys`, `percentile` | Test configuration actually used. |
+  | `initialBalance` | Starting balance, equal to `b0` in every CSV row. |
+  | `realProfit`, `monkeyThreshold`, `meanMonkey`, `stdMonkey`, `zScore`, `rankPercentile` | Statistics comparing the real strategy against the full N-monkey distribution. |
+  | `status` | `"PASSED"`, `"FAILED"`, or `"LOW TRADES"` — exact strings, used directly by the plugin's badges. |
+  | `monkeyProfits` | The full array of N monkey profits, sorted ascending — drives the Gaussian histogram. |
+  | `generatedAtUtc`, `source` | Cache freshness and origin (`"CustomAnalysis"` here; the plugin can also write its own cache with `"Plugin"` when the user runs a live calculation from its own "Run Monkey Test" button). |
 
-This JSON file records the exact temporal range of the trades used (`tradeFromMs`, `tradeToMs` as epoch ms UTC), the sample period (`FULL`, `IS`, or `OOS`), the number of monkeys, the percentile, and the real profit. The **Databank Monkey Test ResultsPlugin** uses this fingerprint to verify that the CSV data matches the strategy currently loaded in the databank before auto-displaying the charts — ensuring that data from a different backtest run or a strategy with the same name is never shown incorrectly.
+> **Integration with the ResultsPlugin:** when a strategy is double-clicked in the databank, the "Databank Monkey Test" Results tab automatically loads these cache files and renders the charts without requiring the user to re-run the simulation. The full v2 cache contract — including exact field formats, the curve-selection algorithm, and how each UI element consumes these fields — is the authoritative specification in:
+> `user/extend/ResultsPlugins/DatabankMonkeyTest/MTCustomAnalysisFixes.md`
 
-> **Integration with the ResultsPlugin:** when a strategy is double-clicked in the databank, the "Databank Monkey Test" Results tab can automatically load and display the Gaussian bell curve and equity comparison charts from the pre-computed CSV, without requiring the user to re-run the simulation. The full interaction contract — including the temporal verification rules, chart data reconstruction map, and the bidirectional write protocol — is documented in:
-> `user/extend/ResultsPlugins/DatabankMonkeyTest/MonkeyTestCustomAnalysisInteraction.md`
+> As with v1, the cache files are only written when the test fully runs (i.e. not for `LOW TRADES`, `FAILED (NO DATA)`, or `ERROR` outcomes); the plugin falls back to a live recalculation when no matching cache is found.

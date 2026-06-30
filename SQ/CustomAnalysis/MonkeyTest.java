@@ -178,8 +178,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     }
 
                     // Open CSV writer for monkey simulation data
-                    new java.io.File("user/exports/MonkeyTest").mkdirs();
-                    String csvPath = "user/exports/MonkeyTest/" + rgClone.getName() + "_monkey_simulation_data.csv";
+                    new java.io.File("user/extend/ResultsPlugins/DatabankMonkeyTest/cache").mkdirs();
+                    String csvPath = "user/extend/ResultsPlugins/DatabankMonkeyTest/cache/" + rgClone.getName() + "_monkey_simulation_data.csv";
                     csvWriter = new java.io.PrintWriter(new java.io.FileWriter(csvPath));
                     csvWriter.println("\"Monkey ID\";\"Ticket\";\"Symbol\";\"Type\";\"Open time\";\"Open price\";\"Size\";\"Close time\";\"Close price\";\"Profit/Loss\";\"Balance\";\"Sample type\";\"Close type\";\"MAE ($)\";\"MFE ($)\";\"Time in trade\";\"Comment\";\"Comm/Swap\";\"Stop Loss price level\";\"Profit/Loss\";\"Profit/Loss Pips\";\"Balance\";\"Profit Target price level\"");
 
@@ -371,7 +371,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
 
                     // Write sidecar fingerprint for ResultsPlugin temporal verification
                     try {
-                        String metaPath = "user/exports/MonkeyTest/" + rgClone.getName() + "_monkey_simulation_data.meta.json";
+                        String metaPath = "user/extend/ResultsPlugins/DatabankMonkeyTest/cache/" + rgClone.getName() + "_monkey_simulation_data.meta.json";
                         metaWriter = new java.io.PrintWriter(new java.io.FileWriter(metaPath));
                         String escapedName = rgClone.getName().replace("\\", "\\\\").replace("\"", "\\\"");
                         metaWriter.println("{");

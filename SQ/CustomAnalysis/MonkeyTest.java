@@ -36,11 +36,13 @@ public class MonkeyTest extends CustomAnalysisMethod {
     @Override
     public ArrayList<ResultsGroup> processDatabank(String projectName, String task, String databankName, ArrayList<ResultsGroup> databankRG) throws Exception {
         // Configuration defaults — can be overridden via Input Args field in the project task
-        // as "numMonkeys,percentile,period" e.g. "500,95,OOS" (period: FULL | IS | OOS, default FULL)
+        // as "numMonkeys,percentile,period,replicationMode,shiftingMode" e.g. "500,95,OOS,IndivBars,Random"
         int numMonkeys = 500;
         double percentile = 95.0;
         byte sampleType = SampleTypes.FullSample;
         String sampleLabel = "FULL";
+        String replicationMode = "IndivBars";
+        String shiftingMode = "Random";
 
         try {
             String inputArgs = this.getInputArgs();
@@ -67,9 +69,31 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         Log.warn("MonkeyTest: unrecognized period argument '" + periodArg + "'. Valid values: FULL, IS, OOS. Defaulting to FULL.");
                     }
                 }
+                if (args.length >= 4 && !args[3].trim().isEmpty()) {
+                    String repArg = args[3].trim();
+                    if (repArg.equalsIgnoreCase("SLTP")) {
+                        replicationMode = "SLTP";
+                    } else if (repArg.equalsIgnoreCase("AvgBars")) {
+                        replicationMode = "AvgBars";
+                    } else if (repArg.equalsIgnoreCase("IndivBars")) {
+                        replicationMode = "IndivBars";
+                    } else {
+                        Log.warn("MonkeyTest: unrecognized replicationMode argument '" + repArg + "'. Valid values: SLTP, AvgBars, IndivBars. Defaulting to IndivBars.");
+                    }
+                }
+                if (args.length >= 5 && !args[4].trim().isEmpty()) {
+                    String shfArg = args[4].trim();
+                    if (shfArg.equalsIgnoreCase("Constant")) {
+                        shiftingMode = "Constant";
+                    } else if (shfArg.equalsIgnoreCase("Random")) {
+                        shiftingMode = "Random";
+                    } else {
+                        Log.warn("MonkeyTest: unrecognized shiftingMode argument '" + shfArg + "'. Valid values: Constant, Random. Defaulting to Random.");
+                    }
+                }
             }
         } catch (Exception e) {
-            Log.warn("Could not read input args, using defaults (500 monkeys, 95%, FULL). Reason: " + e.getMessage());
+            Log.warn("Could not read input args, using defaults (500 monkeys, 95%, FULL, IndivBars, Random). Reason: " + e.getMessage());
         }
 
         Random rng = new Random();
@@ -188,18 +212,32 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         realProfit += tradeOrders.get(i).PL;
                     }
 
+                    // Precompute avgHoldingBars and meanHoldingPeriod
+                    int avgHoldingBars = 4;
+                    double totalHoldingBars = 0.0;
+                    for (int i = 0; i < tradeCount; i++) {
+                        totalHoldingBars += holdingBars(tradeOrders.get(i), tfMs);
+                    }
+                    if (tradeCount > 0) {
+                        avgHoldingBars = (int) Math.round(totalHoldingBars / tradeCount);
+                        if (avgHoldingBars < 1) avgHoldingBars = 1;
+                    }
+                    double meanHoldingPeriod = tradeCount > 0 ? (totalHoldingBars / tradeCount) : 0.0;
+
                     // Run Monte Carlo simulations, keeping each monkey's full equity curve
                     double[] monkeyProfits = new double[numMonkeys];
                     double[][] curves = new double[numMonkeys][];
 
                     for (int m = 0; m < numMonkeys; m++) {
-                        int shift = rng.nextInt(M - 1) + 1;
+                        int globalShift = (M > 1) ? (rng.nextInt(M - 1) + 1) : 0;
                         double runningBalance = initialBalance;
                         double[] curve = new double[tradeCount + 1];
                         curve[0] = initialBalance;
 
                         for (int k = 0; k < tradeCount; k++) {
                             Order o = tradeOrders.get(k);
+
+                            int shift = "Random".equals(shiftingMode) ? ((M > 1) ? (rng.nextInt(M - 1) + 1) : 0) : globalShift;
 
                             // Circular shift relative bar index
                             int r_prime = (r_i[k] - shift) % M;
@@ -208,80 +246,105 @@ public class MonkeyTest extends CustomAnalysisMethod {
 
                             double entryPrice = candles.get(t_prime).open;
 
-                            // Parse original SL / TP relative percentages
-                            boolean hasSL = o.StopLoss > 0 && o.StopLoss != o.OpenPrice && o.StopLoss != Order.NOT_DEFINED;
-                            boolean hasTP = o.TakeProfit > 0 && o.TakeProfit != o.OpenPrice && o.TakeProfit != Order.NOT_DEFINED;
-
-                            double sl_pct = hasSL ? Math.abs(o.StopLoss - o.OpenPrice) / o.OpenPrice : 0.0;
-                            double tp_pct = hasTP ? Math.abs(o.TakeProfit - o.OpenPrice) / o.OpenPrice : 0.0;
-                            int direction = o.isShort() ? -1 : 1;
-
-                            double slPrice = -1;
-                            double tpPrice = -1;
-                            if (hasSL) {
-                                slPrice = direction == 1 ? entryPrice * (1.0 - sl_pct) : entryPrice * (1.0 + sl_pct);
-                            }
-                            if (hasTP) {
-                                tpPrice = direction == 1 ? entryPrice * (1.0 + tp_pct) : entryPrice * (1.0 - tp_pct);
-                            }
-
+                            boolean hasSL = false;
                             double exitPrice = -1;
                             long exitTime = 0;
 
-                            int maxBars = holdingBars(o, tfMs);
-                            boolean useBarLimit = !hasSL && !hasTP;
-                            int maxLoopBars = useBarLimit ? maxBars : (barsCount - t_prime);
-                            if (maxLoopBars <= 0) maxLoopBars = 1;
+                            if ("SLTP".equals(replicationMode)) {
+                                // Parse original SL / TP relative percentages
+                                hasSL = o.StopLoss > 0 && o.StopLoss != o.OpenPrice && o.StopLoss != Order.NOT_DEFINED;
+                                boolean hasTP = o.TakeProfit > 0 && o.TakeProfit != o.OpenPrice && o.TakeProfit != Order.NOT_DEFINED;
 
-                            // Step-by-step path evaluation
-                            for (int b = 0; b < maxLoopBars; b++) {
-                                int candleIdx = (t_prime + b) % barsCount;
-                                Candle c = candles.get(candleIdx);
+                                double sl_pct = hasSL ? Math.abs(o.StopLoss - o.OpenPrice) / o.OpenPrice : 0.0;
+                                double tp_pct = hasTP ? Math.abs(o.TakeProfit - o.OpenPrice) / o.OpenPrice : 0.0;
+                                int direction = o.isShort() ? -1 : 1;
 
-                                if (hasFriday && isAfterFridayExit(c.time, FridayExitHour, FridayExitMinute)) {
-                                    exitPrice = c.open;
-                                    exitTime = c.time;
-                                    break;
+                                double slPrice = -1;
+                                double tpPrice = -1;
+                                if (hasSL) {
+                                    slPrice = direction == 1 ? entryPrice * (1.0 - sl_pct) : entryPrice * (1.0 + sl_pct);
+                                }
+                                if (hasTP) {
+                                    tpPrice = direction == 1 ? entryPrice * (1.0 + tp_pct) : entryPrice * (1.0 - tp_pct);
                                 }
 
-                                double low = c.low;
-                                double high = c.high;
+                                int maxBars = holdingBars(o, tfMs);
+                                boolean useBarLimit = !hasSL && !hasTP;
+                                int maxLoopBars = useBarLimit ? maxBars : (barsCount - t_prime);
+                                if (maxLoopBars <= 0) maxLoopBars = 1;
 
-                                if (direction == 1) { // Long
-                                    if (hasSL && low <= slPrice) {
-                                        exitPrice = slPrice;
+                                // Step-by-step path evaluation
+                                for (int b = 0; b < maxLoopBars; b++) {
+                                    int candleIdx = (t_prime + b) % barsCount;
+                                    Candle c = candles.get(candleIdx);
+
+                                    if (hasFriday && isAfterFridayExit(c.time, FridayExitHour, FridayExitMinute)) {
+                                        exitPrice = c.open;
                                         exitTime = c.time;
                                         break;
                                     }
-                                    if (hasTP && high >= tpPrice) {
-                                        exitPrice = tpPrice;
-                                        exitTime = c.time;
-                                        break;
+
+                                    double low = c.low;
+                                    double high = c.high;
+
+                                    if (direction == 1) { // Long
+                                        if (hasSL && low <= slPrice) {
+                                            exitPrice = slPrice;
+                                            exitTime = c.time;
+                                            break;
+                                        }
+                                        if (hasTP && high >= tpPrice) {
+                                            exitPrice = tpPrice;
+                                            exitTime = c.time;
+                                            break;
+                                        }
+                                    } else { // Short
+                                        if (hasSL && high >= slPrice) {
+                                            exitPrice = slPrice;
+                                            exitTime = c.time;
+                                            break;
+                                        }
+                                        if (hasTP && low <= tpPrice) {
+                                            exitPrice = tpPrice;
+                                            exitTime = c.time;
+                                            break;
+                                        }
                                     }
-                                } else { // Short
-                                    if (hasSL && high >= slPrice) {
-                                        exitPrice = slPrice;
-                                        exitTime = c.time;
-                                        break;
-                                    }
-                                    if (hasTP && low <= tpPrice) {
-                                        exitPrice = tpPrice;
+                                }
+
+                                if (exitPrice == -1) {
+                                    int exitIdx = (t_prime + maxLoopBars - 1) % barsCount;
+                                    exitPrice = candles.get(exitIdx).close;
+                                    exitTime = candles.get(exitIdx).time;
+                                }
+                            } else {
+                                // "AvgBars" or "IndivBars" replication modes
+                                int maxBars = "AvgBars".equals(replicationMode) ? avgHoldingBars : holdingBars(o, tfMs);
+                                int maxLoopBars = Math.min(maxBars, barsCount - t_prime);
+                                if (maxLoopBars <= 0) maxLoopBars = 1;
+
+                                for (int b = 0; b < maxLoopBars; b++) {
+                                    int candleIdx = (t_prime + b) % barsCount;
+                                    Candle c = candles.get(candleIdx);
+
+                                    if (hasFriday && isAfterFridayExit(c.time, FridayExitHour, FridayExitMinute)) {
+                                        exitPrice = c.open;
                                         exitTime = c.time;
                                         break;
                                     }
                                 }
-                            }
 
-                            if (exitPrice == -1) {
-                                int exitIdx = (t_prime + maxLoopBars - 1) % barsCount;
-                                exitPrice = candles.get(exitIdx).close;
-                                exitTime = candles.get(exitIdx).time;
+                                if (exitPrice == -1) {
+                                    int exitIdx = (t_prime + maxLoopBars - 1) % barsCount;
+                                    exitPrice = candles.get(exitIdx).close;
+                                    exitTime = candles.get(exitIdx).time;
+                                }
                             }
 
                             // P&L lot scaling and pip mapping
                             double origPriceDiff = o.ClosePrice - o.OpenPrice;
                             double grossOrigPL = o.PL - o.CommSwap;
-                            double pipMult = Math.abs(origPriceDiff) > 1e-8 ? grossOrigPL / (o.Size * origPriceDiff) : 0.0;
+                            double pipMult = Math.abs(origPriceDiff) > 1e-7 ? grossOrigPL / (o.Size * origPriceDiff) : 0.0;
 
                             double priceCorrection = hasSL ? (o.OpenPrice / entryPrice) : 1.0;
                             double monkeySize = o.Size * priceCorrection;
@@ -390,27 +453,30 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         }
                         profitsArr.append("]");
 
-                        metaWriter.println("{");
-                        metaWriter.println("  \"schemaVersion\": 2,");
-                        metaWriter.println("  \"strategyName\": \"" + escapedName + "\",");
-                        metaWriter.println("  \"period\": \"" + sampleLabel + "\",");
-                        metaWriter.println("  \"tradeFromMs\": " + tMin + ",");
-                        metaWriter.println("  \"tradeToMs\": " + tMax + ",");
-                        metaWriter.println("  \"numTrades\": " + tradeCount + ",");
-                        metaWriter.println("  \"numMonkeys\": " + numMonkeys + ",");
-                        metaWriter.println("  \"percentile\": " + String.format(java.util.Locale.US, "%.1f", percentile) + ",");
-                        metaWriter.println("  \"initialBalance\": " + String.format(java.util.Locale.US, "%.2f", initialBalance) + ",");
-                        metaWriter.println("  \"realProfit\": " + String.format(java.util.Locale.US, "%.2f", realProfit) + ",");
-                        metaWriter.println("  \"monkeyThreshold\": " + String.format(java.util.Locale.US, "%.2f", thresholdVal) + ",");
-                        metaWriter.println("  \"meanMonkey\": " + String.format(java.util.Locale.US, "%.2f", mean) + ",");
-                        metaWriter.println("  \"stdMonkey\": " + String.format(java.util.Locale.US, "%.2f", std) + ",");
-                        metaWriter.println("  \"zScore\": " + String.format(java.util.Locale.US, "%.2f", zScore) + ",");
-                        metaWriter.println("  \"rankPercentile\": " + String.format(java.util.Locale.US, "%.2f", rankPercentile) + ",");
-                        metaWriter.println("  \"status\": \"" + status + "\",");
-                        metaWriter.println("  \"monkeyProfits\": " + profitsArr.toString() + ",");
-                        metaWriter.println("  \"generatedAtUtc\": " + System.currentTimeMillis() + ",");
-                        metaWriter.println("  \"source\": \"CustomAnalysis\"");
-                        metaWriter.println("}");
+                         metaWriter.println("{");
+                         metaWriter.println("  \"schemaVersion\": 3,");
+                         metaWriter.println("  \"strategyName\": \"" + escapedName + "\",");
+                         metaWriter.println("  \"period\": \"" + sampleLabel + "\",");
+                         metaWriter.println("  \"tradeFromMs\": " + tMin + ",");
+                         metaWriter.println("  \"tradeToMs\": " + tMax + ",");
+                         metaWriter.println("  \"numTrades\": " + tradeCount + ",");
+                         metaWriter.println("  \"numMonkeys\": " + numMonkeys + ",");
+                         metaWriter.println("  \"percentile\": " + String.format(java.util.Locale.US, "%.1f", percentile) + ",");
+                         metaWriter.println("  \"replicationMode\": \"" + replicationMode + "\",");
+                         metaWriter.println("  \"shiftingMode\": \"" + shiftingMode + "\",");
+                         metaWriter.println("  \"initialBalance\": " + String.format(java.util.Locale.US, "%.2f", initialBalance) + ",");
+                         metaWriter.println("  \"realProfit\": " + String.format(java.util.Locale.US, "%.2f", realProfit) + ",");
+                         metaWriter.println("  \"monkeyThreshold\": " + String.format(java.util.Locale.US, "%.2f", thresholdVal) + ",");
+                         metaWriter.println("  \"meanMonkey\": " + String.format(java.util.Locale.US, "%.2f", mean) + ",");
+                         metaWriter.println("  \"stdMonkey\": " + String.format(java.util.Locale.US, "%.2f", std) + ",");
+                         metaWriter.println("  \"zScore\": " + String.format(java.util.Locale.US, "%.2f", zScore) + ",");
+                         metaWriter.println("  \"rankPercentile\": " + String.format(java.util.Locale.US, "%.2f", rankPercentile) + ",");
+                         metaWriter.println("  \"status\": \"" + status + "\",");
+                         metaWriter.println("  \"meanHoldingPeriod\": " + String.format(java.util.Locale.US, "%.1f", meanHoldingPeriod) + ",");
+                         metaWriter.println("  \"monkeyProfits\": " + profitsArr.toString() + ",");
+                         metaWriter.println("  \"generatedAtUtc\": " + System.currentTimeMillis() + ",");
+                         metaWriter.println("  \"source\": \"CustomAnalysis\"");
+                         metaWriter.println("}");
                     } catch (Exception cacheEx) {
                         Log.warn("MonkeyTest: could not write cache artifacts for " + rgClone.getName() + ": " + cacheEx.getMessage());
                     }

@@ -30,16 +30,19 @@ For each strategy in the databank, the snippet:
 ### Setup in StrategyQuant X
 1. Add a **Custom Analysis** task to your project.
 2. Select **MonkeyTest** as the analysis method.
-3. In the **Input Args** field of the task settings, configure your parameters as a comma-separated string: `numMonkeys,percentile,period`.
+3. In the **Input Args** field of the task settings, configure your parameters as a comma-separated string: `numMonkeys,percentile,period,replicationMode,shiftingMode`.
 
 ### Input Arguments
 | Parameter | Default Value | Description | Example |
 | :--- | :--- | :--- | :--- |
 | **numMonkeys** | `500` | The number of randomized monkey simulations to run per strategy. | `1000` |
 | **percentile** | `95.0` | The statistical confidence threshold. The strategy must beat this percentage of monkey runs to pass. | `99.0` |
-| **period** | `FULL` | Sample window where the test runs: `FULL` (entire backtest), `IS` (In-Sample only), or `OOS` (Out-of-Sample only). Optional; defaults to `FULL`. | `OOS` |
+| **period** | `FULL` | Sample window where the test runs: `FULL` (entire backtest), `IS` (In-Sample only), or `OOS` (Out-of-Sample only). | `OOS` |
+| **replicationMode**| `IndivBars` | Operation exit simulation mode: `SLTP` (SL & TP Distance), `AvgBars` (Fixed Average Exposure), or `IndivBars` (Individual Trade Exposure). | `SLTP` |
+| **shiftingMode**   | `Random` | Circular time shifting mode: `Constant` (Constant Global Shift) or `Random` (Per-Trade Random Shift). | `Constant` |
 
-*Example Input Args:* `500,95,OOS` (Runs 500 monkeys using only the Out-of-Sample trades, and requires the strategy to beat 95% of them). Omitting the third argument is equivalent to `FULL`.
+*Example Input Args:* `500,95,OOS,IndivBars,Random` (Runs 500 monkeys on OOS trades, using individual bar exposure exits and per-trade random shifting). Omitting replicationMode and shiftingMode automatically defaults to `IndivBars` and `Random`.
+
 
 ---
 
@@ -73,26 +76,29 @@ The snippet writes outcomes directly to the strategy metadata to populate databa
   * Draws a **green PASSED** (`Passed`) if the test passes (and no other filters failed).
   * Draws a **red FAILED** (`Failed Monkey Test`) if the strategy fails, allowing SQX's automated workflow to discard it.
 
-### Cache Files for the Databank Monkey Test ResultsPlugin (v2)
+### Cache Files for the Databank Monkey Test ResultsPlugin (v3)
 To let the **Databank Monkey Test** ResultsPlugin auto-display the Gaussian bell curve and equity comparison charts without recalculating, the snippet writes two cache artifacts per strategy into:
 `user/extend/ResultsPlugins/DatabankMonkeyTest/cache/`
 
 * **`[StrategyName]_monkey_simulation_data.csv`** — a compact "wide" CSV with up to 50 representative monkey equity curves (not a full trade-level dump). Each row is one monkey's full balance path: `monkey_id;b0;b1;...;bT` (semicolon-separated, dot decimals, no quotes, UTF-8 without BOM). Rows are selected from the full distribution of monkey profits — the lowest (`min`), the highest (`max`), and up to 48 intermediate curves spaced evenly by percentile rank — so the plugin can plot a representative "spaghetti" of equity curves against the real strategy's equity, sourced separately from `GET_ORDERS`.
-* **`[StrategyName]_monkey_simulation_data.meta.json`** — all the scalar KPIs plus the full array of monkey profits, schema version 2:
+* **`[StrategyName]_monkey_simulation_data.meta.json`** — all the scalar KPIs plus the full array of monkey profits, schema version 3:
 
   | Field | Description |
   | :--- | :--- |
-  | `schemaVersion` | Always `2`. Marks this as the current cache format. |
+  | `schemaVersion` | Always `3`. Marks this as the current cache format. |
   | `strategyName`, `period` | Strategy name and sample period (`FULL`/`IS`/`OOS`) used for the test. |
   | `tradeFromMs`, `tradeToMs` | Epoch ms (UTC) range of the real trades used — lets the plugin verify the cache matches the strategy currently loaded before trusting it. |
   | `numTrades`, `numMonkeys`, `percentile` | Test configuration actually used. |
+  | `replicationMode` | Operation exit simulation mode used: `SLTP`, `AvgBars`, or `IndivBars`. |
+  | `shiftingMode` | Circular time shifting mode used: `Constant` or `Random`. |
   | `initialBalance` | Starting balance, equal to `b0` in every CSV row. |
   | `realProfit`, `monkeyThreshold`, `meanMonkey`, `stdMonkey`, `zScore`, `rankPercentile` | Statistics comparing the real strategy against the full N-monkey distribution. |
   | `status` | `"PASSED"`, `"FAILED"`, or `"LOW TRADES"` — exact strings, used directly by the plugin's badges. |
+  | `meanHoldingPeriod` | The average trade duration in bars. |
   | `monkeyProfits` | The full array of N monkey profits, sorted ascending — drives the Gaussian histogram. |
   | `generatedAtUtc`, `source` | Cache freshness and origin (`"CustomAnalysis"` here; the plugin can also write its own cache with `"Plugin"` when the user runs a live calculation from its own "Run Monkey Test" button). |
 
-> **Integration with the ResultsPlugin:** when a strategy is double-clicked in the databank, the "Databank Monkey Test" Results tab automatically loads these cache files and renders the charts without requiring the user to re-run the simulation. The full v2 cache contract — including exact field formats, the curve-selection algorithm, and how each UI element consumes these fields — is the authoritative specification in:
-> `user/extend/ResultsPlugins/DatabankMonkeyTest/MTCustomAnalysisFixes.md`
+> **Integration with the ResultsPlugin:** when a strategy is double-clicked in the databank, the "Databank Monkey Test" Results tab automatically loads these cache files and renders the charts without requiring the user to re-run the simulation. The full v3 cache contract — including exact field formats, the curve-selection algorithm, and how each UI element consumes these fields — is the authoritative specification in:
+> `user/extend/ResultsPlugins/DatabankMonkeyTest/MTCustomAnalysisImprovementPlan.md`
 
 > As with v1, the cache files are only written when the test fully runs (i.e. not for `LOW TRADES`, `FAILED (NO DATA)`, or `ERROR` outcomes); the plugin falls back to a live recalculation when no matching cache is found.

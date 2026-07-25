@@ -15,12 +15,18 @@ public class SynthZScoreProfit extends DatabankColumn {
                 5);
 
         setWidth(110);
-        setTooltip("Z-Score del Net Profit original vs media/stdev en 150 sintéticas (Custom Analysis).");
+        setTooltip("Overfitting Ratio: Z-Score (con signo) del Net Profit original vs media/stdev en 150 sintéticas (Custom Analysis).");
     }
 
     @Override
     public String getValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        Object v = rg.specialValues().get("CA_SynthZScoreProfit");
+        String key = "CA_OverfittingRatio" + getSuffix(sampleType);
+        Object v = rg.specialValues().get(key);
+        
+        if (v == null && sampleType == SampleTypes.FullSample) {
+            v = rg.specialValues().get("CA_SynthZScoreProfit");
+        }
+        
         if (v == null) return NOT_AVAILABLE;
 
         double d = (v instanceof Number) ? ((Number) v).doubleValue() : Double.parseDouble(v.toString());
@@ -29,9 +35,22 @@ public class SynthZScoreProfit extends DatabankColumn {
 
     @Override
     public double getNumericValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        Object v = rg.specialValues().get("CA_SynthZScoreProfit");
+        String key = "CA_OverfittingRatio" + getSuffix(sampleType);
+        Object v = rg.specialValues().get(key);
+        
+        if (v == null && sampleType == SampleTypes.FullSample) {
+            v = rg.specialValues().get("CA_SynthZScoreProfit");
+        }
+        
         if (v == null) return 0.0;
         return (v instanceof Number) ? ((Number) v).doubleValue() : Double.parseDouble(v.toString());
+    }
+
+    private String getSuffix(byte sampleType) {
+        if (sampleType == SampleTypes.InSample) return "_IS";
+        if (sampleType == SampleTypes.OutOfSample) return "_OOS";
+        if (sampleType == SampleTypes.InSampleValidation) return "_ISV";
+        return "_Full";
     }
 
     private String formatDouble(double v, int decimals) {

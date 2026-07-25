@@ -28,9 +28,17 @@ For each strategy in the databank, the snippet:
 ## 3. How to Use & Input Arguments
 
 ### Setup in StrategyQuant X
+
+#### 1. Custom Analysis Task
 1. Add a **Custom Analysis** task to your project.
-2. Select **MonkeyTest** as the analysis method.
-3. In the **Input Args** field of the task settings, configure your parameters as a comma-separated string: `numMonkeys,percentile,period,replicationMode,shiftingMode`.
+2. Under **Analysis type**, select **Per Strategy Analysis** (this enables multithreaded computation using all available CPU cores).
+3. Select **MonkeyTest** as the analysis method from the dropdown.
+4. In the **Input Args** field, configure your parameters as a comma-separated string: `numMonkeys,percentile,period,replicationMode,shiftingMode`.
+
+#### 2. Builder Ranking & Retests Tabs
+Since the snippet uses the `Per Strategy Analysis` signature, you can also select **MonkeyTest** from the **Custom Analysis** filter dropdown in the:
+* **Ranking** tab of the Builder/Genetic settings (to filter out strategies automatically during generation).
+* **Retests** settings (to filter out strategies after retesting them on new data).
 
 ### Input Arguments
 | Parameter | Default Value | Description | Example |

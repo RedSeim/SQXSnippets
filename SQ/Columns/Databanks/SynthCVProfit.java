@@ -18,9 +18,15 @@ public class SynthCVProfit extends DatabankColumn {
         setTooltip("Coeficiente de variación de sintéticas: Stdev / |Mean|. Mide inestabilidad del rendimiento.");
     }
 
-    private double calculateCV(ResultsGroup rg) {
-        Object meanObj = rg.specialValues().get("CA_SynthMeanProfit");
-        Object stdevObj = rg.specialValues().get("CA_SynthStdevProfit");
+    private double calculateCV(ResultsGroup rg, byte sampleType) {
+        String suffix = getSuffix(sampleType);
+        Object meanObj = rg.specialValues().get("CA_SynthMeanProfit" + suffix);
+        Object stdevObj = rg.specialValues().get("CA_SynthStdevProfit" + suffix);
+
+        if ((meanObj == null || stdevObj == null) && sampleType == SampleTypes.FullSample) {
+            meanObj = rg.specialValues().get("CA_SynthMeanProfit");
+            stdevObj = rg.specialValues().get("CA_SynthStdevProfit");
+        }
 
         if (meanObj == null || stdevObj == null) return -1.0;
 
@@ -33,15 +39,22 @@ public class SynthCVProfit extends DatabankColumn {
 
     @Override
     public String getValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        double cv = calculateCV(rg);
+        double cv = calculateCV(rg, sampleType);
         if (cv < 0) return NOT_AVAILABLE;
         return formatDouble(cv, 2);
     }
 
     @Override
     public double getNumericValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        double cv = calculateCV(rg);
+        double cv = calculateCV(rg, sampleType);
         return (cv < 0) ? 0.0 : cv;
+    }
+
+    private String getSuffix(byte sampleType) {
+        if (sampleType == SampleTypes.InSample) return "_IS";
+        if (sampleType == SampleTypes.OutOfSample) return "_OOS";
+        if (sampleType == SampleTypes.InSampleValidation) return "_ISV";
+        return "_Full";
     }
 
     private String formatDouble(double v, int decimals) {

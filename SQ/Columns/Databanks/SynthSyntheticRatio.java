@@ -4,28 +4,24 @@ import com.strategyquant.lib.*;
 import com.strategyquant.datalib.*;
 import com.strategyquant.tradinglib.*;
 
-public class SynthStdevProfit extends DatabankColumn {
+public class SynthSyntheticRatio extends DatabankColumn {
 
-    public SynthStdevProfit() {
-        super("SynthStdevProfit",
+    public SynthSyntheticRatio() {
+        super("SynthSyntheticRatio",
                 DatabankColumn.Decimal2,
-                ValueTypes.Minimize,
+                ValueTypes.Maximize,
                 0,
-                0,
-                1000000);
+                -10,
+                10);
 
-        setWidth(140);
-        setTooltip("Desviación estándar del Net Profit obtenida en el retest (Custom Analysis).");
+        setWidth(120);
+        setTooltip("Synthetic Ratio (Filtro de Ergodicidad): Media / Desviación estándar de beneficios sintéticos (Custom Analysis).");
     }
 
     @Override
     public String getValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        String key = "CA_SynthStdevProfit" + getSuffix(sampleType);
+        String key = "CA_SyntheticRatio" + getSuffix(sampleType);
         Object v = rg.specialValues().get(key);
-        
-        if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthStdevProfit");
-        }
         
         if (v == null) return NOT_AVAILABLE;
 
@@ -35,12 +31,8 @@ public class SynthStdevProfit extends DatabankColumn {
 
     @Override
     public double getNumericValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        String key = "CA_SynthStdevProfit" + getSuffix(sampleType);
+        String key = "CA_SyntheticRatio" + getSuffix(sampleType);
         Object v = rg.specialValues().get(key);
-        
-        if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthStdevProfit");
-        }
         
         if (v == null) return 0.0;
         return (v instanceof Number) ? ((Number) v).doubleValue() : Double.parseDouble(v.toString());

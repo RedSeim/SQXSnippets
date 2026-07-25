@@ -20,7 +20,13 @@ public class SynthMeanProfit extends DatabankColumn {
 
     @Override
     public String getValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        Object v = rg.specialValues().get("CA_SynthMeanProfit");
+        String key = "CA_SynthMeanProfit" + getSuffix(sampleType);
+        Object v = rg.specialValues().get(key);
+        
+        if (v == null && sampleType == SampleTypes.FullSample) {
+            v = rg.specialValues().get("CA_SynthMeanProfit");
+        }
+        
         if (v == null) return NOT_AVAILABLE;
 
         double d = (v instanceof Number) ? ((Number) v).doubleValue() : Double.parseDouble(v.toString());
@@ -29,9 +35,22 @@ public class SynthMeanProfit extends DatabankColumn {
 
     @Override
     public double getNumericValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        Object v = rg.specialValues().get("CA_SynthMeanProfit");
+        String key = "CA_SynthMeanProfit" + getSuffix(sampleType);
+        Object v = rg.specialValues().get(key);
+        
+        if (v == null && sampleType == SampleTypes.FullSample) {
+            v = rg.specialValues().get("CA_SynthMeanProfit");
+        }
+        
         if (v == null) return 0.0;
         return (v instanceof Number) ? ((Number) v).doubleValue() : Double.parseDouble(v.toString());
+    }
+
+    private String getSuffix(byte sampleType) {
+        if (sampleType == SampleTypes.InSample) return "_IS";
+        if (sampleType == SampleTypes.OutOfSample) return "_OOS";
+        if (sampleType == SampleTypes.InSampleValidation) return "_ISV";
+        return "_Full";
     }
 
     private String formatDouble(double v, int decimals) {

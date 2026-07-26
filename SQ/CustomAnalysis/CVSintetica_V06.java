@@ -273,6 +273,16 @@ public class CVSintetica_V06 extends CustomAnalysisMethod {
 
         ResultsGroup results = backtestEngine.runBacktest().getResults();
 
+        try {
+            com.strategyquant.tradinglib.strategy.OutOfSample oos = resolveOOS(source);
+            if (oos != null) {
+                results.setOOSSettings(oos);
+                results.computeAllStats();
+            }
+        } catch (Exception e) {
+            // Ignored to prevent test from aborting
+        }
+
         BacktestRunInfo info = new BacktestRunInfo();
         info.results = results;
         info.requestedEngine = requestedEngine;
@@ -509,11 +519,11 @@ public class CVSintetica_V06 extends CustomAnalysisMethod {
     private ITradingSimulator createSimulatorStrict(String normalizedEngine) throws Exception {
     String[] candidateClasses;
 
-        if ("MetaTrader5Hedging".equals(normalizedEngine)) {
+        if ("MetaTrader5Hedged".equals(normalizedEngine) || "MetaTrader5Hedging".equals(normalizedEngine)) {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.MetaTrader5SimulatorHedging"
             };
-        } else if ("MetaTrader5Netting".equals(normalizedEngine)) {
+        } else if ("MetaTrader5Netted".equals(normalizedEngine) || "MetaTrader5Netting".equals(normalizedEngine)) {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.MetaTrader5SimulatorNetting"
             };
@@ -521,7 +531,7 @@ public class CVSintetica_V06 extends CustomAnalysisMethod {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.MetaTrader4Simulator"
             };
-        } else if ("TradeStation".equals(normalizedEngine)) {
+        } else if ("Tradestation".equals(normalizedEngine) || "TradeStation".equals(normalizedEngine)) {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.TradeStationSimulator"
             };
@@ -569,13 +579,12 @@ public class CVSintetica_V06 extends CustomAnalysisMethod {
 
 
     private boolean applyBacktestEngineToChartSetup(ChartSetup chartSetup, String normalizedEngine) throws Exception {
-        Class<?> enginesClass = Class.forName("com.strategyquant.tradinglib.Engines");
+        Class<?> enginesClass = Class.forName("com.strategyquant.tradinglib.simulator.Engines");
+        Method getEngineMethod = enginesClass.getMethod("getEngine", String.class);
+        int engineId = (Integer) getEngineMethod.invoke(null, normalizedEngine);
 
-        @SuppressWarnings("unchecked")
-        Object enumValue = Enum.valueOf((Class<Enum>) enginesClass.asSubclass(Enum.class), normalizedEngine);
-
-        Method method = chartSetup.getClass().getMethod("setBacktestEngine", enginesClass);
-        method.invoke(chartSetup, enumValue);
+        Method setEngineMethod = chartSetup.getClass().getMethod("setBacktestEngine", int.class);
+        setEngineMethod.invoke(chartSetup, engineId);
 
         return true;
     }
@@ -586,12 +595,12 @@ public class CVSintetica_V06 extends CustomAnalysisMethod {
 
         if (el.contains("metatrader5") || el.equals("mt5")) {
             // Distinguir hedging vs netting según lo que venga en el XML
-            if (el.contains("netting") || el.contains("netted")) return "MetaTrader5Netting";
+            if (el.contains("netting") || el.contains("netted")) return "MetaTrader5Netted";
             // Por defecto MT5 → Hedging (estándar en Forex/Darwinex)
-            return "MetaTrader5Hedging";
+            return "MetaTrader5Hedged";
         }
         if (el.contains("metatrader4") || el.equals("mt4")) return "MetaTrader4";
-        if (el.contains("tradestation"))                    return "TradeStation";
+        if (el.contains("tradestation"))                    return "Tradestation";
         if (el.contains("ninjatrader"))                     return "NinjaTrader";
         if (el.contains("jforex"))                          return "JForex";
         if (el.contains("stockpicker") || el.contains("stock picker")) return "Stockpicker";
@@ -765,5 +774,60 @@ public class CVSintetica_V06 extends CustomAnalysisMethod {
         String simulatorClass;
         boolean chartEngineApplied;
         boolean chartEngineApplyFailed;
+    }
+
+    private com.strategyquant.tradinglib.strategy.OutOfSample resolveOOS(ResultsGroup source) {
+        try {
+            com.strategyquant.tradinglib.strategy.OutOfSample oos = source.getOOS();
+            if (oos != null && !oos.isEmpty()) {
+                return oos;
+            }
+
+            Result mainResult = source.mainResult();
+            if (mainResult != null) {
+                SettingsMap settings = mainResult.getSettings();
+                if (settings != null) {
+                    Object oosObj = settings.get(SettingsKeys.OutOfSample);
+                    if (oosObj instanceof com.strategyquant.tradinglib.strategy.OutOfSample) {
+                        return (com.strategyquant.tradinglib.strategy.OutOfSample) oosObj;
+                    }
+                }
+            }
+
+            String lastSettingsXml = source.getLastSettings();
+            if (lastSettingsXml != null && !lastSettingsXml.trim().isEmpty()) {
+                Element root = XMLUtil.stringToElement(lastSettingsXml);
+                if (root != null) {
+                    Element elOOS = root.getChild("OutOfSample");
+                    if (elOOS != null) {
+                        com.strategyquant.tradinglib.strategy.OutOfSample oos2 = new com.strategyquant.tradinglib.strategy.OutOfSample();
+                        oos2.setFromXML(elOOS);
+                        if (!oos2.isEmpty()) {
+                            return oos2;
+                        }
+                    }
+                }
+            }
+
+            Element elStrategy = source.getStrategyXml();
+            if (elStrategy != null) {
+                Element elOOS = elStrategy.getChild("OutOfSample");
+                if (elOOS == null) {
+                    Element elSettings = elStrategy.getChild("Settings");
+                    if (elSettings != null) {
+                        elOOS = elSettings.getChild("OutOfSample");
+                    }
+                }
+                if (elOOS != null) {
+                    com.strategyquant.tradinglib.strategy.OutOfSample oos3 = new com.strategyquant.tradinglib.strategy.OutOfSample();
+                    oos3.setFromXML(elOOS);
+                    if (!oos3.isEmpty()) {
+                        return oos3;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        return null;
     }
 }

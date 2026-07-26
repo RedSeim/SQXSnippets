@@ -24,7 +24,13 @@ public class SynthMeanProfit extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthMeanProfit");
+            v = rg.specialValues().get("CA_SynthMeanProfit_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthMeanProfit_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthMeanProfit");
+            }
         }
         
         if (v == null) return NOT_AVAILABLE;
@@ -39,7 +45,13 @@ public class SynthMeanProfit extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthMeanProfit");
+            v = rg.specialValues().get("CA_SynthMeanProfit_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthMeanProfit_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthMeanProfit");
+            }
         }
         
         if (v == null) return 0.0;

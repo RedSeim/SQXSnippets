@@ -24,7 +24,13 @@ public class SynthFailCount extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthFailCount");
+            v = rg.specialValues().get("CA_SynthFailCount_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthFailCount_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthFailCount");
+            }
         }
         
         if (v == null) return NOT_AVAILABLE;
@@ -44,7 +50,13 @@ public class SynthFailCount extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthFailCount");
+            v = rg.specialValues().get("CA_SynthFailCount_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthFailCount_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthFailCount");
+            }
         }
         
         if (v == null) return 0.0;

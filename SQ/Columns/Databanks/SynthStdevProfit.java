@@ -24,7 +24,13 @@ public class SynthStdevProfit extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthStdevProfit");
+            v = rg.specialValues().get("CA_SynthStdevProfit_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthStdevProfit_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthStdevProfit");
+            }
         }
         
         if (v == null) return NOT_AVAILABLE;
@@ -39,7 +45,13 @@ public class SynthStdevProfit extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthStdevProfit");
+            v = rg.specialValues().get("CA_SynthStdevProfit_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthStdevProfit_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthStdevProfit");
+            }
         }
         
         if (v == null) return 0.0;

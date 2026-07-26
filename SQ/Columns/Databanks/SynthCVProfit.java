@@ -24,8 +24,16 @@ public class SynthCVProfit extends DatabankColumn {
         Object stdevObj = rg.specialValues().get("CA_SynthStdevProfit" + suffix);
 
         if ((meanObj == null || stdevObj == null) && sampleType == SampleTypes.FullSample) {
-            meanObj = rg.specialValues().get("CA_SynthMeanProfit");
-            stdevObj = rg.specialValues().get("CA_SynthStdevProfit");
+            meanObj = rg.specialValues().get("CA_SynthMeanProfit_OOS");
+            stdevObj = rg.specialValues().get("CA_SynthStdevProfit_OOS");
+            if (meanObj == null || stdevObj == null) {
+                meanObj = rg.specialValues().get("CA_SynthMeanProfit_IS");
+                stdevObj = rg.specialValues().get("CA_SynthStdevProfit_IS");
+            }
+            if (meanObj == null || stdevObj == null) {
+                meanObj = rg.specialValues().get("CA_SynthMeanProfit");
+                stdevObj = rg.specialValues().get("CA_SynthStdevProfit");
+            }
         }
 
         if (meanObj == null || stdevObj == null) return -1.0;

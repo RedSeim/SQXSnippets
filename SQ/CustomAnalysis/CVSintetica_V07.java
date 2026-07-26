@@ -29,26 +29,41 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
     private static final int SYNTHETIC_COUNT = 150;
     private static final String DEFAULT_PREFIX = "XAUUSD_Darwinex_sim";
 
+
     public CVSintetica_V07() {
         super("CVSintetica_V07", TYPE_FILTER_STRATEGY);
     }
 
     @Override
     public boolean filterStrategy(String project, String task, String databankName, ResultsGroup rg) throws Exception {
+        logDebug("==========================================================================");
+        logDebug("=== START filterStrategy for strategy: " + rg.getName() + " ===");
+        logDebug("project: " + project + ", task: " + task + ", databankName: " + databankName);
 
         Result mainResult = rg.mainResult();
         if (mainResult == null) {
+            logDebug("mainResult is null, skipping strategy " + rg.getName());
             return true;
         }
 
-        String synthPrefix = getInputArgs();
-        if (synthPrefix == null || synthPrefix.trim().isEmpty()) {
-            synthPrefix = DEFAULT_PREFIX;
-        } else {
-            synthPrefix = synthPrefix.trim();
+        String inputArgs = getInputArgs();
+        String synthPrefix = DEFAULT_PREFIX;
+        String targetPeriod = "FULL";
+
+        if (inputArgs != null && !inputArgs.trim().isEmpty()) {
+            String[] parts = inputArgs.split(",");
+            if (parts.length > 0) {
+                synthPrefix = parts[0].trim();
+            }
+            if (parts.length > 1) {
+                targetPeriod = parts[1].trim().toUpperCase();
+            }
         }
 
+        logDebug("inputArgs: " + inputArgs + " -> synthPrefix: " + synthPrefix + ", targetPeriod: " + targetPeriod);
+
         String originalSymbol = resolveOriginalSymbol(rg, mainResult);
+        logDebug("originalSymbol resolved: " + originalSymbol);
 
         // Periodos admitidos en SQX y sus sufijos correspondientes
         byte[] periods = {
@@ -58,6 +73,22 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
             SampleTypes.FullSample
         };
         String[] suffixes = {"_IS", "_OOS", "_ISV", "_Full"};
+
+        // Determinar qué índices de periodo se van a procesar
+        ArrayList<Integer> activePeriodIndices = new ArrayList<Integer>();
+        if (targetPeriod.equals("IS")) {
+            activePeriodIndices.add(0);
+        } else if (targetPeriod.equals("OOS") || targetPeriod.equals("IIS")) {
+            activePeriodIndices.add(1);
+        } else if (targetPeriod.equals("ISV")) {
+            activePeriodIndices.add(2);
+        } else {
+            // FULL o por defecto
+            activePeriodIndices.add(0);
+            activePeriodIndices.add(1);
+            activePeriodIndices.add(2);
+            activePeriodIndices.add(3);
+        }
 
         double[] originalProfits = new double[periods.length];
         int[] originalTrades = new int[periods.length];
@@ -75,6 +106,7 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
 
         if (originalSymbol != null && !originalSymbol.trim().isEmpty()) {
             try {
+                logDebug("[" + rg.getName() + "] RETESTING ORIGINAL SYMBOL: " + originalSymbol);
                 BacktestRunInfo info = runBacktestWithInheritedSettings(rg, originalSymbol);
 
                 requestedEngine = info.requestedEngine;
@@ -83,10 +115,11 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
                 originalChartEngineApplied = info.chartEngineApplied ? 1 : 0;
                 originalChartEngineApplyFailed = info.chartEngineApplyFailed ? 1 : 0;
 
-                // Extraemos valores reales para cada periodo
-                for (int p = 0; p < periods.length; p++) {
+                // Extraemos valores reales para cada periodo activo
+                for (int p : activePeriodIndices) {
                     originalProfits[p] = safeGetNetProfit(info.results, periods[p]);
                     originalTrades[p] = safeGetTradeCount(info.results, periods[p]);
+                    logDebug("[" + rg.getName() + "] ORIGINAL RESULT FOR PERIOD " + suffixes[p] + " (type=" + periods[p] + "): Profit=" + originalProfits[p] + ", Trades=" + originalTrades[p]);
                 }
 
             } catch (BadStrategyException e) {
@@ -94,16 +127,19 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
                 originalRetestBadStrategy = 1;
                 originalUsedFallback = 1;
                 originalRetestException = shortError(e);
+                logDebug("[" + rg.getName() + "] ORIGINAL RETEST BadStrategyException: " + originalRetestException);
             } catch (Exception e) {
                 originalRetestFailed = 1;
                 originalUsedFallback = 1;
                 originalRetestException = shortError(e);
+                logDebug("[" + rg.getName() + "] ORIGINAL RETEST Exception: " + originalRetestException);
             }
         } else {
             originalRetestFailed = 1;
             originalUsedFallback = 1;
             originalSymbol = "N/A";
             originalRetestException = "Original symbol could not be resolved";
+            logDebug("[" + rg.getName() + "] ORIGINAL RETEST FAILED: symbol empty");
         }
 
         // Listas para almacenar beneficios netos sintéticos por cada periodo
@@ -123,6 +159,8 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         String lastSyntheticException = "";
         String lastSyntheticSimulatorClass = "N/A";
 
+        logDebug("[" + rg.getName() + "] STARTING LOOP FOR " + SYNTHETIC_COUNT + " SYNTHETIC SYMBOLS. Prefix: " + synthPrefix);
+
         for (int i = 1; i <= SYNTHETIC_COUNT; i++) {
             String synthSymbol = String.format("%s%03d", synthPrefix, i);
 
@@ -135,8 +173,8 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
                     synthChartEngineApplyFailedCount++;
                 }
 
-                // Procesamos cada periodo de manera independiente
-                for (int p = 0; p < periods.length; p++) {
+                // Procesamos únicamente los periodos activos de manera independiente
+                for (int p : activePeriodIndices) {
                     double pVal = safeGetNetProfit(info.results, periods[p]);
                     int tVal = safeGetTradeCount(info.results, periods[p]);
 
@@ -148,12 +186,17 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
                     } else {
                         periodSuccessCounts[p]++;
                     }
+
+                    if (i <= 5) {
+                        logDebug("[" + rg.getName() + "] Synth #" + i + " (" + synthSymbol + ") period " + suffixes[p] + ": Profit=" + pVal + ", Trades=" + tVal);
+                    }
                 }
 
             } catch (BadStrategyException e) {
                 lastSyntheticException = shortError(e);
+                logDebug("[" + rg.getName() + "] Synth #" + i + " (" + synthSymbol + ") BadStrategyException: " + lastSyntheticException);
                 
-                for (int p = 0; p < periods.length; p++) {
+                for (int p : activePeriodIndices) {
                     periodFailCounts[p]++;
                     periodBadStrategyCounts[p]++;
                 }
@@ -164,15 +207,16 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
 
             } catch (Exception e) {
                 lastSyntheticException = shortError(e);
-                for (int p = 0; p < periods.length; p++) {
+                logDebug("[" + rg.getName() + "] Synth #" + i + " (" + synthSymbol + ") Exception: " + lastSyntheticException);
+                for (int p : activePeriodIndices) {
                     periodFailCounts[p]++;
                     periodExceptionCounts[p]++;
                 }
             }
         }
 
-        // Calculamos estadísticas por periodo y guardamos en SpecialValues
-        for (int p = 0; p < periods.length; p++) {
+        // Calculamos estadísticas por periodo activo y guardamos en SpecialValues
+        for (int p : activePeriodIndices) {
             ArrayList<Double> profitsList = periodProfits.get(p);
             double mean = mean(profitsList);
             double stdev = stdevSample(profitsList, mean);
@@ -209,23 +253,26 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         }
 
         // Guardar variables de retrocompatibilidad (Full Sample)
-        double meanFull = mean(periodProfits.get(3));
-        double stdevFull = stdevSample(periodProfits.get(3), meanFull);
-        double origProfitFull = originalProfits[3];
-        double zFull = (stdevFull > 0.0) ? (origProfitFull - meanFull) / stdevFull : 0.0;
+        if (targetPeriod.equals("FULL")) {
+            double meanFull = mean(periodProfits.get(3));
+            double stdevFull = stdevSample(periodProfits.get(3), meanFull);
+            double origProfitFull = originalProfits[3];
+            double zFull = (stdevFull > 0.0) ? (origProfitFull - meanFull) / stdevFull : 0.0;
 
-        rg.specialValues().set("CA_SynthMeanProfit", meanFull);
-        rg.specialValues().set("CA_SynthStdevProfit", stdevFull);
-        rg.specialValues().set("CA_SynthZScoreProfit", zFull);
-        rg.specialValues().set("CA_OriginalProfit", origProfitFull);
-        rg.specialValues().set("CA_OriginalTrades", originalTrades[3]);
-        rg.specialValues().set("CA_SynthFailCount", periodFailCounts[3]);
-        rg.specialValues().set("CA_SynthSuccessCount", periodSuccessCounts[3]);
+            rg.specialValues().set("CA_SynthMeanProfit", meanFull);
+            rg.specialValues().set("CA_SynthStdevProfit", stdevFull);
+            rg.specialValues().set("CA_SynthZScoreProfit", zFull);
+            rg.specialValues().set("CA_OriginalProfit", origProfitFull);
+            rg.specialValues().set("CA_OriginalTrades", originalTrades[3]);
+            rg.specialValues().set("CA_SynthFailCount", periodFailCounts[3]);
+            rg.specialValues().set("CA_SynthSuccessCount", periodSuccessCounts[3]);
+
+            rg.specialValues().set("CA_SynthBadStrategyCount", periodBadStrategyCounts[3]);
+            rg.specialValues().set("CA_SynthExceptionCount", periodExceptionCounts[3]);
+        }
 
         // Guardado de control
         rg.specialValues().set("CA_SynthRequestedCount", SYNTHETIC_COUNT);
-        rg.specialValues().set("CA_SynthBadStrategyCount", periodBadStrategyCounts[3]);
-        rg.specialValues().set("CA_SynthExceptionCount", periodExceptionCounts[3]);
         rg.specialValues().set("CA_SynthSameBarErrorCount", synthSameBarErrorCount);
         rg.specialValues().set("CA_SynthChartEngineApplyFailedCount", synthChartEngineApplyFailedCount);
 
@@ -252,14 +299,17 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
      * Ejecuta un nuevo backtest intentando heredar la configuración original.
      */
     private BacktestRunInfo runBacktestWithInheritedSettings(ResultsGroup source, String targetSymbol) throws Exception {
+        logDebug("[" + source.getName() + "] [runBacktestWithInheritedSettings] targetSymbol: " + targetSymbol);
 
         Result mainResult = source.mainResult();
         if (mainResult == null) {
+            logDebug("[" + source.getName() + "] ERROR: mainResult is null");
             throw new Exception("mainResult is null");
         }
 
         SettingsMap baseSettings = mainResult.getSettings();
         if (baseSettings == null) {
+            logDebug("[" + source.getName() + "] ERROR: mainResult.getSettings() returned null");
             throw new Exception("mainResult.getSettings() returned null");
         }
 
@@ -267,6 +317,7 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
 
         Element elStrategy = source.getStrategyXml();
         if (elStrategy == null) {
+            logDebug("[" + source.getName() + "] ERROR: Strategy XML not found");
             throw new Exception("Strategy XML not found");
         }
 
@@ -284,7 +335,9 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
 
         long dateFrom = resolveDateFrom(source);
         long dateTo = resolveDateTo(source);
+        logDebug("[" + source.getName() + "] Resolved dates: dateFrom = " + dateFrom + " (" + new java.util.Date(dateFrom) + "), dateTo = " + dateTo + " (" + new java.util.Date(dateTo) + ")");
         if (dateFrom <= 0 || dateTo <= 0 || dateFrom >= dateTo) {
+            logDebug("[" + source.getName() + "] ERROR: Invalid original date range");
             throw new Exception("Invalid original date range");
         }
 
@@ -295,8 +348,11 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         double minDistance = extractSetupDoubleAttr(lastSettingsXml, "minDist", getDoubleSetting(settings, SettingsKeys.MinimumDistance, 0.0));
         int testPrecision = normalizeTestPrecision(resolveTestPrecision(lastSettingsXml, settings));
 
+        logDebug("[" + source.getName() + "] TF: " + timeframe + ", Session: " + session + ", Spread: " + spread + ", Slippage: " + slippage + ", MinDist: " + minDistance + ", Precision: " + testPrecision);
+
         String requestedEngine = resolveEngineName(lastSettingsXml);
         String normalizedEngine = normalizeEngineName(requestedEngine);
+        logDebug("[" + source.getName() + "] requestedEngine: " + requestedEngine + " -> normalizedEngine: " + normalizedEngine);
 
         ChartSetup chartSetup = new ChartSetup(
                 "History",
@@ -313,13 +369,32 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         boolean chartEngineApplied = false;
         boolean chartEngineApplyFailed = false;
 
+        // FIX 1: Use the raw requestedEngine string for Engines.getEngine(), which expects
+        // the display name (e.g. "MetaTrader5 (hedged)"), not the normalized internal name.
         try {
-            chartEngineApplied = applyBacktestEngineToChartSetup(chartSetup, normalizedEngine);
+            chartEngineApplied = applyBacktestEngineToChartSetup(chartSetup, requestedEngine);
             if (!chartEngineApplied) {
                 chartEngineApplyFailed = true;
             }
         } catch (Exception e) {
             chartEngineApplyFailed = true;
+        }
+
+        // FIX 2: Resolve the OOS configuration and inject it into the SettingsMap BEFORE
+        // running the backtest. This ensures the backtest engine labels each order with the
+        // correct SampleType (InSample vs OutOfSample) during simulation, not after the fact.
+        com.strategyquant.tradinglib.strategy.OutOfSample oosConfig = null;
+        try {
+            oosConfig = resolveOOS(source);
+            logDebug("[" + source.getName() + "] pre-backtest resolveOOS is null: " + (oosConfig == null));
+            if (oosConfig != null) {
+                logDebug("[" + source.getName() + "] Injecting OOS into settings BEFORE backtest: " + oosConfig.toString());
+                settings.set(SettingsKeys.OutOfSample, oosConfig);
+            }
+        } catch (Exception e) {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            logDebug("[" + source.getName() + "] WARNING: could not inject OOS pre-backtest: " + sw.toString());
         }
 
         settings.set(SettingsKeys.BacktestChart, chartSetup);
@@ -329,12 +404,33 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
 
         ITradingSimulator simulator = createSimulatorStrict(normalizedEngine);
         applySafeSimulatorTestPrecision(simulator, testPrecision);
+        logDebug("[" + source.getName() + "] Created simulator: " + simulator.getClass().getName());
 
         BacktestEngine backtestEngine = new BacktestEngine(simulator);
         backtestEngine.setSingleThreaded(true);
         backtestEngine.addSetup(settings);
 
+        logDebug("[" + source.getName() + "] Launching backtest engine on symbol: " + targetSymbol);
         ResultsGroup results = backtestEngine.runBacktest().getResults();
+        logDebug("[" + source.getName() + "] Backtest finished. results is null: " + (results == null));
+
+        // Post-backtest: also call setOOSSettings + computeAllStats on the result to ensure
+        // stats are partitioned correctly in the final ResultsGroup.
+        try {
+            if (oosConfig != null) {
+                logDebug("[" + source.getName() + "] Post-backtest: Applying OOS settings: " + oosConfig.toString());
+                results.setOOSSettings(oosConfig);
+                logDebug("[" + source.getName() + "] setOOSSettings successfully called.");
+                results.computeAllStats();
+                logDebug("[" + source.getName() + "] computeAllStats successfully called.");
+            } else {
+                logDebug("[" + source.getName() + "] WARNING: oosConfig is null, skipping post-backtest OOS application.");
+            }
+        } catch (Exception e) {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            logDebug("[" + source.getName() + "] ERROR applying OOS post-backtest: " + sw.toString());
+        }
 
         BacktestRunInfo info = new BacktestRunInfo();
         info.results = results;
@@ -580,11 +676,11 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
     private ITradingSimulator createSimulatorStrict(String normalizedEngine) throws Exception {
         String[] candidateClasses;
 
-        if ("MetaTrader5Hedging".equals(normalizedEngine)) {
+        if ("MetaTrader5Hedged".equals(normalizedEngine) || "MetaTrader5Hedging".equals(normalizedEngine)) {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.MetaTrader5SimulatorHedging"
             };
-        } else if ("MetaTrader5Netting".equals(normalizedEngine)) {
+        } else if ("MetaTrader5Netted".equals(normalizedEngine) || "MetaTrader5Netting".equals(normalizedEngine)) {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.MetaTrader5SimulatorNetting"
             };
@@ -592,7 +688,7 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.MetaTrader4Simulator"
             };
-        } else if ("TradeStation".equals(normalizedEngine)) {
+        } else if ("Tradestation".equals(normalizedEngine) || "TradeStation".equals(normalizedEngine)) {
             candidateClasses = new String[]{
                 "com.strategyquant.tradinglib.simulator.impl.TradeStationSimulator"
             };
@@ -636,16 +732,47 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
     }
 
 
-    private boolean applyBacktestEngineToChartSetup(ChartSetup chartSetup, String normalizedEngine) throws Exception {
-        Class<?> enginesClass = Class.forName("com.strategyquant.tradinglib.Engines");
+    /**
+     * Applies the backtest engine to a ChartSetup by resolving the numeric engine ID.
+     * IMPORTANT: engineDisplayName must be the raw display name as stored in SQX settings
+     * (e.g. "MetaTrader5 (hedged)"), NOT the normalized internal name (e.g. "MetaTrader5Hedged"),
+     * because Engines.getEngine() does string matching against the human-readable display names.
+     */
+    private boolean applyBacktestEngineToChartSetup(ChartSetup chartSetup, String engineDisplayName) throws Exception {
+        try {
+            Class<?> enginesClass = Class.forName("com.strategyquant.tradinglib.simulator.Engines");
+            Method getEngineMethod = enginesClass.getMethod("getEngine", String.class);
+            int engineId = (Integer) getEngineMethod.invoke(null, engineDisplayName);
+            logDebug("[applyBacktestEngineToChartSetup] resolved engineId for '" + engineDisplayName + "': " + engineId);
 
-        @SuppressWarnings("unchecked")
-        Object enumValue = Enum.valueOf((Class<Enum>) enginesClass.asSubclass(Enum.class), normalizedEngine);
+            if (engineId < 0) {
+                // Fallback: try also the common display name variants
+                String[] fallbacks = {
+                    "MetaTrader5 (hedged)", "MetaTrader5 (netted)", "MetaTrader4",
+                    "Tradestation", "MultiCharts", "JForex"
+                };
+                for (String fb : fallbacks) {
+                    if (fb.equalsIgnoreCase(engineDisplayName)) continue;
+                    int fbId = (Integer) getEngineMethod.invoke(null, fb);
+                    if (fbId >= 0) {
+                        engineId = fbId;
+                        logDebug("[applyBacktestEngineToChartSetup] fallback engineId resolved via '" + fb + "': " + engineId);
+                        break;
+                    }
+                }
+            }
 
-        Method method = chartSetup.getClass().getMethod("setBacktestEngine", enginesClass);
-        method.invoke(chartSetup, enumValue);
+            Method setEngineMethod = chartSetup.getClass().getMethod("setBacktestEngine", int.class);
+            setEngineMethod.invoke(chartSetup, engineId);
+            logDebug("[applyBacktestEngineToChartSetup] successfully called setBacktestEngine(int) with " + engineId);
 
-        return true;
+            return engineId >= 0;
+        } catch (Exception e) {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            logDebug("[applyBacktestEngineToChartSetup] ERROR: " + sw.toString());
+            throw e;
+        }
     }
 
     private String normalizeEngineName(String engineName) {
@@ -653,11 +780,11 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         String el = engineName.trim().toLowerCase();
 
         if (el.contains("metatrader5") || el.equals("mt5")) {
-            if (el.contains("netting") || el.contains("netted")) return "MetaTrader5Netting";
-            return "MetaTrader5Hedging";
+            if (el.contains("netting") || el.contains("netted")) return "MetaTrader5Netted";
+            return "MetaTrader5Hedged";
         }
         if (el.contains("metatrader4") || el.equals("mt4")) return "MetaTrader4";
-        if (el.contains("tradestation"))                    return "TradeStation";
+        if (el.contains("tradestation"))                    return "Tradestation";
         if (el.contains("ninjatrader"))                     return "NinjaTrader";
         if (el.contains("jforex"))                          return "JForex";
         if (el.contains("stockpicker") || el.contains("stock picker")) return "Stockpicker";
@@ -831,5 +958,115 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         String simulatorClass;
         boolean chartEngineApplied;
         boolean chartEngineApplyFailed;
+    }
+
+    private static synchronized void logDebug(String msg) {
+        try {
+            java.io.FileWriter fw = new java.io.FileWriter("g:\\Software\\StrategyQuantX\\144\\user\\extend\\Snippets\\SQ\\CustomAnalysis\\CVSintetica_debug.log", true);
+            java.io.PrintWriter pw = new java.io.PrintWriter(fw);
+            String timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new java.util.Date());
+            pw.println("[" + timestamp + "] [Thread-" + Thread.currentThread().getId() + "] " + msg);
+            pw.close();
+            fw.close();
+        } catch (Exception ignored) {}
+    }
+
+    private com.strategyquant.tradinglib.strategy.OutOfSample resolveOOS(ResultsGroup source) {
+        try {
+            logDebug("[resolveOOS] Starting resolution for strategy: " + source.getName());
+            
+            com.strategyquant.tradinglib.strategy.OutOfSample oos = source.getOOS();
+            if (oos != null && !oos.isEmpty()) {
+                logDebug("[resolveOOS] found valid OOS directly from source.getOOS(): " + oos.toString());
+                return oos;
+            } else {
+                logDebug("[resolveOOS] source.getOOS() is null or empty. isEmpty: " + (oos == null ? "null" : oos.isEmpty()));
+            }
+
+            Result mainResult = source.mainResult();
+            if (mainResult != null) {
+                SettingsMap settings = mainResult.getSettings();
+                if (settings != null) {
+                    logDebug("[resolveOOS] settings is not null. SettingsMap type: " + settings.getClass().getName());
+                    Object oosObj = settings.get(SettingsKeys.OutOfSample);
+                    if (oosObj instanceof com.strategyquant.tradinglib.strategy.OutOfSample) {
+                        logDebug("[resolveOOS] found valid OOS in mainResult settings map under SettingsKeys.OutOfSample");
+                        return (com.strategyquant.tradinglib.strategy.OutOfSample) oosObj;
+                    } else {
+                        logDebug("[resolveOOS] settings.get(SettingsKeys.OutOfSample) type: " + (oosObj == null ? "null" : oosObj.getClass().getName()));
+                    }
+                } else {
+                    logDebug("[resolveOOS] mainResult settings is null!");
+                }
+            } else {
+                logDebug("[resolveOOS] mainResult is null!");
+            }
+
+            String lastSettingsXml = source.getLastSettings();
+            logDebug("[resolveOOS] lastSettingsXml is null: " + (lastSettingsXml == null) + ", length: " + (lastSettingsXml == null ? 0 : lastSettingsXml.length()));
+            if (lastSettingsXml != null && !lastSettingsXml.trim().isEmpty()) {
+                if (lastSettingsXml.length() < 3000) {
+                    logDebug("[resolveOOS] lastSettingsXml content: " + lastSettingsXml);
+                } else {
+                    logDebug("[resolveOOS] lastSettingsXml start: " + lastSettingsXml.substring(0, 1000));
+                }
+                Element root = XMLUtil.stringToElement(lastSettingsXml);
+                if (root != null) {
+                    logDebug("[resolveOOS] root element name: " + root.getName());
+                    Element elOOS = findElementRecursive(root, "OutOfSample");
+                    if (elOOS != null) {
+                        com.strategyquant.tradinglib.strategy.OutOfSample oos2 = new com.strategyquant.tradinglib.strategy.OutOfSample();
+                        oos2.setFromXML(elOOS);
+                        if (!oos2.isEmpty()) {
+                            logDebug("[resolveOOS] parsed valid OOS from lastSettingsXml recursive search: " + oos2.toString());
+                            return oos2;
+                        } else {
+                            logDebug("[resolveOOS] parsed OOS from lastSettingsXml was empty!");
+                        }
+                    } else {
+                        logDebug("[resolveOOS] OutOfSample tag not found in lastSettingsXml!");
+                    }
+                }
+            }
+
+            Element elStrategy = source.getStrategyXml();
+            logDebug("[resolveOOS] strategyXml is null: " + (elStrategy == null));
+            if (elStrategy != null) {
+                Element elOOS = findElementRecursive(elStrategy, "OutOfSample");
+                if (elOOS != null) {
+                    com.strategyquant.tradinglib.strategy.OutOfSample oos3 = new com.strategyquant.tradinglib.strategy.OutOfSample();
+                    oos3.setFromXML(elOOS);
+                    if (!oos3.isEmpty()) {
+                        logDebug("[resolveOOS] parsed valid OOS from strategyXml recursive search: " + oos3.toString());
+                        return oos3;
+                    } else {
+                        logDebug("[resolveOOS] parsed OOS from strategyXml was empty!");
+                    }
+                } else {
+                    logDebug("[resolveOOS] OutOfSample tag not found in strategyXml!");
+                }
+            }
+        } catch (Exception e) {
+            java.io.StringWriter sw = new java.io.StringWriter();
+            e.printStackTrace(new java.io.PrintWriter(sw));
+            logDebug("[resolveOOS] Error resolving OOS: " + sw.toString());
+        }
+
+        logDebug("[resolveOOS] WARNING: Could not resolve OutOfSample settings!");
+        return null;
+    }
+
+    private Element findElementRecursive(Element parent, String name) {
+        if (parent == null) return null;
+        if (parent.getName().equalsIgnoreCase(name)) {
+            return parent;
+        }
+        for (Element child : parent.getChildren()) {
+            Element found = findElementRecursive(child, name);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
     }
 }

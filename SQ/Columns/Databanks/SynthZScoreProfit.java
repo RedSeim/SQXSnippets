@@ -24,7 +24,13 @@ public class SynthZScoreProfit extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthZScoreProfit");
+            v = rg.specialValues().get("CA_OverfittingRatio_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_OverfittingRatio_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthZScoreProfit");
+            }
         }
         
         if (v == null) return NOT_AVAILABLE;
@@ -39,7 +45,13 @@ public class SynthZScoreProfit extends DatabankColumn {
         Object v = rg.specialValues().get(key);
         
         if (v == null && sampleType == SampleTypes.FullSample) {
-            v = rg.specialValues().get("CA_SynthZScoreProfit");
+            v = rg.specialValues().get("CA_OverfittingRatio_OOS");
+            if (v == null) {
+                v = rg.specialValues().get("CA_OverfittingRatio_IS");
+            }
+            if (v == null) {
+                v = rg.specialValues().get("CA_SynthZScoreProfit");
+            }
         }
         
         if (v == null) return 0.0;

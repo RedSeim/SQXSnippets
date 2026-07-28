@@ -30,6 +30,10 @@ public class MonkeyTest extends CustomAnalysisMethod {
 
     @Override
     public boolean filterStrategy(String projectName, String task, String databankName, ResultsGroup rg) throws Exception {
+        try {
+            rg.specialValues().setString("MonkeyTestPercentile", "N/A");
+        } catch (Exception ignored) {}
+
         // Configuration defaults — can be overridden via Input Args field in the project task
         // as "numMonkeys,percentile,period,replicationMode,shiftingMode" e.g. "500,95,OOS,IndivBars,Random"
         int numMonkeys = 500;
@@ -383,6 +387,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 } else {
                     status = "FAILED";
                 }
+
+                rg.specialValues().setString("MonkeyTestPercentile", String.format(java.util.Locale.US, "%.2f%%", rankPercentile));
 
                 // Write cache artifacts (wide CSV with representative equity curves + meta.json v2)
                 try {

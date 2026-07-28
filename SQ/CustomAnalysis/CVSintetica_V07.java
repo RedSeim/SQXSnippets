@@ -26,7 +26,7 @@ import java.util.List;
  */
 public class CVSintetica_V07 extends CustomAnalysisMethod {
 
-    private static final int SYNTHETIC_COUNT = 150;
+    private static final int DEFAULT_SYNTHETIC_COUNT = 100;
     private static final String DEFAULT_PREFIX = "XAUUSD_Darwinex_sim";
 
 
@@ -49,6 +49,7 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         String inputArgs = getInputArgs();
         String synthPrefix = DEFAULT_PREFIX;
         String targetPeriod = "FULL";
+        int syntheticCount = DEFAULT_SYNTHETIC_COUNT;
 
         if (inputArgs != null && !inputArgs.trim().isEmpty()) {
             String[] parts = inputArgs.split(",");
@@ -58,9 +59,21 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
             if (parts.length > 1) {
                 targetPeriod = parts[1].trim().toUpperCase();
             }
+            if (parts.length > 2) {
+                try {
+                    syntheticCount = Integer.parseInt(parts[2].trim());
+                    if (syntheticCount <= 0) {
+                        logDebug("Synthetic count must be positive. Provided: " + syntheticCount + ". Falling back to: " + DEFAULT_SYNTHETIC_COUNT);
+                        syntheticCount = DEFAULT_SYNTHETIC_COUNT;
+                    }
+                } catch (NumberFormatException e) {
+                    logDebug("Invalid third argument for synthetic count: '" + parts[2] + "', using default: " + DEFAULT_SYNTHETIC_COUNT);
+                    syntheticCount = DEFAULT_SYNTHETIC_COUNT;
+                }
+            }
         }
 
-        logDebug("inputArgs: " + inputArgs + " -> synthPrefix: " + synthPrefix + ", targetPeriod: " + targetPeriod);
+        logDebug("inputArgs: " + inputArgs + " -> synthPrefix: " + synthPrefix + ", targetPeriod: " + targetPeriod + ", syntheticCount: " + syntheticCount);
 
         String originalSymbol = resolveOriginalSymbol(rg, mainResult);
         logDebug("originalSymbol resolved: " + originalSymbol);
@@ -159,9 +172,9 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         String lastSyntheticException = "";
         String lastSyntheticSimulatorClass = "N/A";
 
-        logDebug("[" + rg.getName() + "] STARTING LOOP FOR " + SYNTHETIC_COUNT + " SYNTHETIC SYMBOLS. Prefix: " + synthPrefix);
+        logDebug("[" + rg.getName() + "] STARTING LOOP FOR " + syntheticCount + " SYNTHETIC SYMBOLS. Prefix: " + synthPrefix);
 
-        for (int i = 1; i <= SYNTHETIC_COUNT; i++) {
+        for (int i = 1; i <= syntheticCount; i++) {
             String synthSymbol = String.format("%s%03d", synthPrefix, i);
 
             try {
@@ -229,7 +242,7 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
             double syntheticRatio = (stdev > 0.0) ? mean / stdev : 0.0;
 
             // 3. Pass_Rate (Survival Rate de 0.0 a 1.0)
-            double passRate = (double) periodSuccessCounts[p] / SYNTHETIC_COUNT;
+            double passRate = (double) periodSuccessCounts[p] / syntheticCount;
 
             String suffix = suffixes[p];
 
@@ -243,7 +256,7 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
             rg.specialValues().set("CA_SynthSuccessCount" + suffix, periodSuccessCounts[p]);
             rg.specialValues().set("CA_SynthFailCount" + suffix, periodFailCounts[p]);
 
-            // 4. SinteticNetProfits (CSV de los 150 profits sintéticos)
+            // 4. SinteticNetProfits (CSV de los profits sintéticos)
             StringBuilder sb = new StringBuilder();
             for (int j = 0; j < profitsList.size(); j++) {
                 if (j > 0) sb.append(",");
@@ -272,7 +285,7 @@ public class CVSintetica_V07 extends CustomAnalysisMethod {
         }
 
         // Guardado de control
-        rg.specialValues().set("CA_SynthRequestedCount", SYNTHETIC_COUNT);
+        rg.specialValues().set("CA_SynthRequestedCount", syntheticCount);
         rg.specialValues().set("CA_SynthSameBarErrorCount", synthSameBarErrorCount);
         rg.specialValues().set("CA_SynthChartEngineApplyFailedCount", synthChartEngineApplyFailedCount);
 

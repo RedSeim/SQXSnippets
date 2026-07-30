@@ -32,6 +32,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
     public boolean filterStrategy(String projectName, String task, String databankName, ResultsGroup rg) throws Exception {
         try {
             rg.specialValues().setString("MonkeyTestPercentile", "N/A");
+            rg.specialValues().setString("MonkeyTestZScore", "N/A");
         } catch (Exception ignored) {}
 
         // Configuration defaults — can be overridden via Input Args field in the project task
@@ -200,12 +201,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     r_i[i] = originalIdx - idxMin;
                 }
 
-                // Initial balance and real strategy net profit, derived from tradeOrders
+                // Initial balance, derived from tradeOrders
                 double initialBalance = tradeOrders.get(0).AccountBalance - tradeOrders.get(0).PL;
-                double realProfit = 0;
-                for (int i = 0; i < tradeCount; i++) {
-                    realProfit += tradeOrders.get(i).PL;
-                }
 
                 // Precompute avgHoldingBars and meanHoldingPeriod
                 int avgHoldingBars = 4;
@@ -219,6 +216,17 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 }
                 double meanHoldingPeriod = tradeCount > 0 ? (totalHoldingBars / tradeCount) : 0.0;
 
+                int actualCount = tradeCount;
+                if ("Random".equals(shiftingMode)) {
+                    actualCount = Math.min(tradeCount, (int) Math.floor((double) M / avgHoldingBars));
+                    if (actualCount <= 0) actualCount = 1;
+                }
+
+                double realProfit = 0;
+                for (int i = 0; i < actualCount; i++) {
+                    realProfit += tradeOrders.get(i).PL;
+                }
+
                 // Run Monte Carlo simulations, keeping each monkey's full equity curve
                 double[] monkeyProfits = new double[numMonkeys];
                 double[][] curves = new double[numMonkeys][];
@@ -226,18 +234,38 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 for (int m = 0; m < numMonkeys; m++) {
                     int globalShift = (M > 1) ? (rng.nextInt(M - 1) + 1) : 0;
                     double runningBalance = initialBalance;
-                    double[] curve = new double[tradeCount + 1];
+                    double[] curve = new double[actualCount + 1];
                     curve[0] = initialBalance;
 
-                    for (int k = 0; k < tradeCount; k++) {
+                    int[] entries = new int[actualCount];
+                    if ("Random".equals(shiftingMode)) {
+                        double[] raws = new double[actualCount];
+                        for (int i = 0; i < actualCount; i++) {
+                            raws[i] = rng.nextDouble();
+                        }
+                        java.util.Arrays.sort(raws);
+
+                        int usable = M - (actualCount - 1) * avgHoldingBars;
+                        if (usable < 1) usable = 1;
+
+                        for (int i = 0; i < actualCount; i++) {
+                            int relativeOffset = (int) Math.floor(raws[i] * usable) + i * avgHoldingBars;
+                            if (relativeOffset >= M) {
+                                relativeOffset = M - 1;
+                            }
+                            entries[i] = idxMin + relativeOffset;
+                        }
+                    } else {
+                        for (int k = 0; k < actualCount; k++) {
+                            int r_prime = (r_i[k] - globalShift) % M;
+                            if (r_prime < 0) r_prime += M;
+                            entries[k] = idxMin + r_prime;
+                        }
+                    }
+
+                    for (int k = 0; k < actualCount; k++) {
                         Order o = tradeOrders.get(k);
-
-                        int shift = "Random".equals(shiftingMode) ? ((M > 1) ? (rng.nextInt(M - 1) + 1) : 0) : globalShift;
-
-                        // Circular shift relative bar index
-                        int r_prime = (r_i[k] - shift) % M;
-                        if (r_prime < 0) r_prime += M;
-                        int t_prime = idxMin + r_prime;
+                        int t_prime = entries[k];
 
                         double entryPrice = candles.get(t_prime).open;
 
@@ -356,7 +384,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     }
 
                     curves[m] = curve;
-                    monkeyProfits[m] = curve[tradeCount] - curve[0];
+                    monkeyProfits[m] = curve[actualCount] - curve[0];
                 }
 
                 // Statistics over all N monkeys (mean/std/zScore/threshold/rankPercentile/status)
@@ -370,6 +398,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 double std = Math.sqrt(variance);
 
                 double zScore = std > 0 ? (realProfit - mean) / std : 0.0;
+                rg.specialValues().setString("MonkeyTestZScore", String.format(java.util.Locale.US, "%.2f", zScore));
 
                 double[] sortedProfits = monkeyProfits.clone();
                 Arrays.sort(sortedProfits);
@@ -420,7 +449,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         new java.io.FileOutputStream(csvPath), java.nio.charset.StandardCharsets.UTF_8));
 
                     StringBuilder header = new StringBuilder("monkey_id");
-                    for (int b = 0; b <= tradeCount; b++) header.append(";b").append(b);
+                    for (int b = 0; b <= actualCount; b++) header.append(";b").append(b);
                     csvWriter.println(header.toString());
 
                     int qLabel = 1;
@@ -432,7 +461,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
 
                         double[] curve = curves[order[pos]];
                         StringBuilder row = new StringBuilder(label);
-                        for (int b = 0; b <= tradeCount; b++) {
+                        for (int b = 0; b <= actualCount; b++) {
                             row.append(';').append(String.format(java.util.Locale.US, "%.2f", curve[b]));
                         }
                         csvWriter.println(row.toString());
@@ -456,7 +485,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
                      metaWriter.println("  \"period\": \"" + sampleLabel + "\",");
                      metaWriter.println("  \"tradeFromMs\": " + tMin + ",");
                      metaWriter.println("  \"tradeToMs\": " + tMax + ",");
-                     metaWriter.println("  \"numTrades\": " + tradeCount + ",");
+                     metaWriter.println("  \"numTrades\": " + actualCount + ",");
                      metaWriter.println("  \"numMonkeys\": " + numMonkeys + ",");
                      metaWriter.println("  \"percentile\": " + String.format(java.util.Locale.US, "%.1f", percentile) + ",");
                      metaWriter.println("  \"replicationMode\": \"" + replicationMode + "\",");

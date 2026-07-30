@@ -1,6 +1,8 @@
 # Documentación: Custom Analysis de Robustez Sintética (CVSintetica)
 
-El script `CVSintetica_V07` es un Custom Analysis diseñado para **StrategyQuant X** (SQX) con el objetivo de evaluar la robustez y la ergodicidad de las estrategias de trading frente al ruido del mercado.
+El script `CVSintetica_V08` (y su predecesor `CVSintetica_V07`) es un Custom Analysis diseñado para **StrategyQuant X** (SQX) con el objetivo de evaluar la robustez y la ergodicidad de las estrategias de trading frente al ruido del mercado.
+
+La versión **`CVSintetica_V08`** incluye soporte de ejecución multihilo en paralelo, reduciendo drásticamente los tiempos de procesamiento en procesadores con múltiples núcleos.
 
 ---
 
@@ -20,7 +22,14 @@ El flujo de ejecución del Custom Analysis se compone de los siguientes pasos:
     *   **Out-of-Sample (OOS)** (Validación)
     *   **In-Sample Validation (ISV)** (Validación cruzada)
     *   **Full Sample (Full)** (Historial completo)
-3.  **Simulaciones Sintéticas:** Ejecuta **N backtests independientes** (100 por defecto) sustituyendo el símbolo original por los símbolos sintéticos numerados de forma secuencial (ej. si se configuran 100 simulaciones con el prefijo `EURUSD_H1_ftmo_SYN_`, buscará desde `001` hasta `100`).
+
+    Este backtest de control hereda del backtest original:
+    *   Money Management, Trading Options (incl. Realistic Gaps), Commissions y Swap, leyendo siempre el `<Setup>` **principal** del XML de configuración de la estrategia (no cualquier `<Setup>` que aparezca primero en el árbol — si el proyecto tiene Setups adicionales de Retest/Cross-Check con comisión, swap u opciones distintas, no se confunden con el principal).
+    *   Fechas, timeframe, sesión, spread, slippage, distancia mínima y precisión de test.
+    *   El mismo motor/engine que la estrategia original (MetaTrader5 Hedged/Netted, MetaTrader4, Tradestation, NinjaTrader, JForex o Stockpicker), resuelto individualmente para cada estrategia desde su propio XML.
+
+    Para los motores **MetaTrader5 (Hedged y Netted)**, el simulador reproduce el backtest original con fidelidad **trade a trade** (verificado empíricamente contra el Databank, sin diferencias de precio ni de operaciones), corrigiendo un parámetro interno del simulador que antes hacía que un pequeño número de operaciones límite (entradas que "rozan" el nivel sin disparar claramente) no se reprodujeran en el retest. Esto no afecta a otros motores (MT4, Tradestation, NinjaTrader, JForex, Stockpicker), que no tienen ese parámetro.
+3.  **Simulaciones Sintéticas Paralelas (V08):** Ejecuta **N backtests concurrentes** (100 por defecto) sustituyendo el símbolo original por los símbolos sintéticos de manera paralela utilizando todos los hilos libres de tu CPU para acelerar el procesamiento.
 4.  **Cálculo de Métricas:** Para cada simulación y periodo activo se extrae el beneficio neto y número de operaciones. Finalmente, se calculan las siguientes métricas estadísticas clave:
     *   **Pass Rate (Tasa de Supervivencia):** El porcentaje de simulaciones sintéticas donde la estrategia terminó con ganancias estrictas y operó al menos una vez:
         $$\text{Pass Rate} = \frac{\text{Simulaciones Sintéticas Ganadoras y con Operaciones}}{\text{Total de Simulaciones (N)}}$$
@@ -37,14 +46,14 @@ El flujo de ejecución del Custom Analysis se compone de los siguientes pasos:
 ### Configuración en el Code Editor
 1.  Abre **StrategyQuant X**.
 2.  Ve al menú **Code Editor**.
-3.  Navega a la carpeta `Snippets/SQ/CustomAnalysis/` y haz doble clic sobre `CVSintetica_V07.java`.
+3.  Navega a la carpeta `Snippets/SQ/CustomAnalysis/` y haz doble clic sobre `CVSintetica_V08.java`.
 4.  Pulsa el botón **Compile** en la barra de herramientas superior para que SQX cargue la nueva lógica.
 
 ### Configuración de Argumentos en Tareas (Projects / Builder / Optimizer)
 Para usar este Custom Analysis en tus flujos de optimización, debes añadir la tarea de análisis personalizado y configurar los argumentos de entrada bajo el siguiente formato:
 
 ```text
-nombrededataausar, periodo, [cantidad_de_simulaciones]
+nombrededataausar, periodo, [cantidad_de_simulaciones], [Debug]
 ```
 
 #### Argumento 1: `nombrededataausar` (Prefijo de Data Sintética)
@@ -67,8 +76,16 @@ Define el número exacto de variaciones de datos sintéticos sobre las que se ej
 *   *Por defecto:* `100` (si no se especifica o si se introduce un valor no numérico o menor o igual a cero).
 *   *Ejemplo:* `150` (el bucle recorrerá desde el índice 1 hasta el 150).
 
+#### Argumento 4: `Debug` (Opcional)
+Activa el volcado detallado trade a trade para diagnosticar diferencias de Net Profit entre el backtest original del Databank y su reejecución (retest) dentro del Custom Analysis.
+
+*   Si el 4º argumento es literalmente la palabra `Debug` (no distingue mayúsculas/minúsculas), se genera/actualiza el fichero `CVSintetica_trades_compare.log` (en la misma carpeta que el snippet) con un bloque por cada backtest realizado (el de control sobre el símbolo original y cada una de las simulaciones sintéticas), delimitado por `--- START COMPARE FOR <estrategia> [symbol=<símbolo>, control=<true|false>] ---` / `--- END COMPARE FOR <estrategia> ---`. Dentro de cada bloque, una línea por operación con el formato `ORIGINAL|RETEST;estrategia;símbolo;Trade#N;LONG|SHORT;OpenTime=...;CloseTime=...;OpenPrice=...;ClosePrice=...;Size=...;GrossPL=...;CommSwap=...;NetPL=...;CloseType=...`, más una línea `=== TOTAL TRADES ... ===` con el recuento. El bloque `ORIGINAL` solo se incluye en la ejecución de control (`control=true`), no se repite en cada sintético. Cada bloque se escribe de una sola vez (operación sincronizada atómica), por lo que no se entrelaza con los de otros hilos aunque se ejecuten en paralelo.
+*   *Por defecto* (si se omite este argumento o se pone cualquier otra cosa): **no se genera dicho log**, para no consumir espacio en disco innecesariamente en corridas con muchas estrategias.
+*   *Ejemplo:* `EURUSD_H1_ftmo_SYN_, OOS, 100, Debug`.
+
 ### Ejemplos de Cadenas de Argumentos:
 *   `EURUSD_H1_ftmo_SYN_, FULL` $\rightarrow$ Ejecuta el análisis en todos los periodos usando **100** simulaciones por defecto.
-*   `EURUSD_H1_ftmo_SYN_, FULL, 150` $\rightarrow$ Ejecuta el análisis en todos los periodos usando exactamente **150** simulaciones.
+*   `EURUSD_H1_ftmo_SYN_, FULL, 150` $\rightarrow$ Ejecuta el análisis en todos los periodos usando exactamente **150** simulaciones (ejecutadas en paralelo).
 *   `EURUSD_H1_ftmo_SYN_, IS, 50` $\rightarrow$ Analiza y guarda únicamente la robustez del periodo In-Sample usando **50** simulaciones.
 *   `EURUSD_H1_ftmo_SYN_, OOS, 120` $\rightarrow$ Analiza y guarda únicamente la robustez del periodo Out-of-Sample usando **120** simulaciones.
+*   `EURUSD_H1_ftmo_SYN_, OOS, 100, Debug` $\rightarrow$ Igual que el anterior con **100** simulaciones, y además genera `CVSintetica_trades_compare.log` con el detalle trade a trade de la ejecución de control y de cada simulación sintética.

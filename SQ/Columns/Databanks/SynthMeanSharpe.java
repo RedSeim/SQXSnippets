@@ -15,7 +15,7 @@ public class SynthMeanSharpe extends DatabankColumn {
                 10);
 
         setWidth(120);
-        setTooltip("Synth Mean Sharpe: Ratio de Sharpe (Media / Desviación estándar) de beneficios sintéticos (Custom Analysis).");
+        setTooltip("Synth Mean Sharpe: Media de los Ratios de Sharpe de todas las simulaciones sintéticas (Custom Analysis).");
     }
 
     @Override

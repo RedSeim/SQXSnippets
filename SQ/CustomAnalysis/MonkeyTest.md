@@ -14,7 +14,7 @@ It simulates "monkeys" trading the strategy by taking the exact trade sequence (
 ## 2. Core Logic & How It Works
 For each strategy in the databank, the snippet:
 1. **Reads Native History Data**: Locates the symbol connection and timeframe from the main backtest and parses the native StrategyQuant BDF database file (`.dat`) dynamically.
-2. **Filters by Sample Period**: Applies the selected period (`FULL`, `IS`, or `OOS`) to restrict both the real strategy's trade set and the monkey simulations to that window. The circular shift range is automatically bounded to the bars covered by the filtered trades. If the selected period contains no trades (e.g. the backtest was run without an OOS period configured), the strategy is marked as `LOW TRADES`.
+2. **Filters by Sample Period**: Applies the selected period (`FULL`, `IS`, `OOS`, or numbered OOS segments such as `OOS1`, `OOS2`, `OOS3`, etc.) to restrict both the real strategy's trade set and the monkey simulations to that window. The circular shift range is automatically bounded to the bars covered by the filtered trades. If the selected period contains no trades (e.g. the backtest was run without an OOS period configured), the strategy is marked as `LOW TRADES`. If an invalid or non-existent OOS segment is specified (e.g., `OOS3` when only 2 OOS segments exist), it is marked as `FAILED (INVALID PERIOD)`.
 3. **Performs Circular Shifts**: Generates $N$ randomized runs. For each run (monkey), all trades are shifted forward in time by a random offset, wrapping around the history boundary.
 4. **Simulates Path Evaluation**:
    * **Entries**: Opened at the shifted bar's Open price.
@@ -33,7 +33,7 @@ For each strategy in the databank, the snippet:
 1. Add a **Custom Analysis** task to your project.
 2. Under **Analysis type**, select **Per Strategy Analysis** (this enables multithreaded computation using all available CPU cores).
 3. Select **MonkeyTest** as the analysis method from the dropdown.
-4. In the **Input Args** field, configure your parameters as a comma-separated string: `numMonkeys,percentile,period,replicationMode,shiftingMode`.
+4. In the **Input Args** field, configure your parameters as a comma-separated string: `numMonkeys,percentile,period,replicationMode,shiftingMode`. Optionally, append the keyword `ResultsPluginCache` anywhere in that same string to also write the cache artifacts consumed by the Databank Monkey Test ResultsPlugin (see [section 4](#4-expected-outputs) below).
 
 #### 2. Builder Ranking & Retests Tabs
 Since the snippet uses the `Per Strategy Analysis` signature, you can also select **MonkeyTest** from the **Custom Analysis** filter dropdown in the:
@@ -45,11 +45,12 @@ Since the snippet uses the `Per Strategy Analysis` signature, you can also selec
 | :--- | :--- | :--- | :--- |
 | **numMonkeys** | `500` | The number of randomized monkey simulations to run per strategy. | `1000` |
 | **percentile** | `95.0` | The statistical confidence threshold. The strategy must beat this percentage of monkey runs to pass. | `99.0` |
-| **period** | `FULL` | Sample window where the test runs: `FULL` (entire backtest), `IS` (In-Sample only), or `OOS` (Out-of-Sample only). | `OOS` |
+| **period** | `FULL` | Sample window where the test runs: `FULL` (entire backtest), `IS` (In-Sample only), `OOS` (combined Out-of-Sample), or specific OOS sub-periods (`OOS1`, `OOS2`, `OOS3`, ...). | `OOS2` |
 | **replicationMode**| `IndivBars` | Operation exit simulation mode: `SLTP` (SL & TP Distance), `AvgBars` (Fixed Average Exposure), or `IndivBars` (Individual Trade Exposure). | `SLTP` |
 | **shiftingMode**   | `Random` | Circular time shifting mode: `Constant` (Constant Global Shift) or `Random` (Per-Trade Random Shift). | `Constant` |
+| **ResultsPluginCache** | *(absent)* | Optional keyword, not positional — it is detected as a case-insensitive substring anywhere in the Input Args string, so it can be appended after any of the 5 parameters above. When present, the snippet writes the cache artifacts (CSV + meta.json) described in [section 4](#4-expected-outputs). When absent (default), **no cache files are written**, regardless of the test outcome. | `500,95,OOS2,IndivBars,Random,ResultsPluginCache` |
 
-*Example Input Args:* `500,95,OOS,IndivBars,Random` (Runs 500 monkeys on OOS trades, using individual bar exposure exits and per-trade random shifting). Omitting replicationMode and shiftingMode automatically defaults to `IndivBars` and `Random`.
+*Example Input Args:* `500,95,OOS2,IndivBars,Random` (Runs 500 monkeys on OOS2 trades, using individual bar exposure exits and per-trade random shifting; no cache files written). Omitting replicationMode and shiftingMode automatically defaults to `IndivBars` and `Random`. Add `ResultsPluginCache` anywhere in the string, e.g. `500,95,OOS2,IndivBars,Random,ResultsPluginCache`, to also write the cache files for the ResultsPlugin.
 
 
 ---
@@ -78,15 +79,18 @@ The snippet writes outcomes directly to the strategy metadata to populate databa
   * `PASSED`: The strategy's net profit beat the defined percentile of the randomized monkey runs.
   * `FAILED`: The strategy did not beat the percentile threshold.
   * `LOW TRADES`: The strategy has fewer than 20 trades in the selected period (too few to perform a reliable statistical analysis). Also shown when the selected period (`IS`/`OOS`) contains zero trades, which typically means the backtest was not configured with that sample period.
+  * `FAILED (INVALID PERIOD)`: The requested period (e.g. `OOS3`) does not exist on the strategy (e.g. strategy only has 2 OOS segments).
   * `FAILED (NO DATA)`: The historical `.dat` file for the symbol/timeframe was missing in the SQX history folders.
   * `ERROR`: An unexpected execution error occurred.
 * **Filters Result Column** (`FiltersResultFailedReason` / `FilterResult` keys):
   * Draws a **green PASSED** (`Passed`) if the test passes (and no other filters failed).
-  * Draws a **red FAILED** (`Failed Monkey Test`) if the strategy fails, allowing SQX's automated workflow to discard it.
+  * Draws a **red FAILED** (`Failed Monkey Test` or `Failed Monkey Test (Invalid Period)`) if the strategy fails, allowing SQX's automated workflow to discard it.
 
 ### Cache Files for the Databank Monkey Test ResultsPlugin (v3)
-To let the **Databank Monkey Test** ResultsPlugin auto-display the Gaussian bell curve and equity comparison charts without recalculating, the snippet writes two cache artifacts per strategy into:
+To let the **Databank Monkey Test** ResultsPlugin auto-display the Gaussian bell curve and equity comparison charts without recalculating, the snippet can write two cache artifacts per strategy into:
 `user/extend/ResultsPlugins/DatabankMonkeyTest/cache/`
+
+> **Opt-in via `ResultsPluginCache`:** these two files are only written when the `ResultsPluginCache` keyword is present in the Input Args (see the [Input Arguments table](#input-arguments)). By default (keyword absent), the snippet still computes and stores the `MonkeyTestResult`, `MonkeyTestPercentile` and `MonkeyTestZScore` databank values, but **skips writing these cache files entirely** — nothing is created or updated on disk. Add the keyword only if you intend to inspect that strategy's result in the Databank Monkey Test ResultsPlugin, to avoid accumulating cache files for strategies you don't plan to review.
 
 * **`[StrategyName]_monkey_simulation_data.csv`** — a compact "wide" CSV with up to 50 representative monkey equity curves (not a full trade-level dump). Each row is one monkey's full balance path: `monkey_id;b0;b1;...;bT` (semicolon-separated, dot decimals, no quotes, UTF-8 without BOM). Rows are selected from the full distribution of monkey profits — the lowest (`min`), the highest (`max`), and up to 48 intermediate curves spaced evenly by percentile rank — so the plugin can plot a representative "spaghetti" of equity curves against the real strategy's equity, sourced separately from `GET_ORDERS`.
 * **`[StrategyName]_monkey_simulation_data.meta.json`** — all the scalar KPIs plus the full array of monkey profits, schema version 3:
@@ -109,4 +113,4 @@ To let the **Databank Monkey Test** ResultsPlugin auto-display the Gaussian bell
 > **Integration with the ResultsPlugin:** when a strategy is double-clicked in the databank, the "Databank Monkey Test" Results tab automatically loads these cache files and renders the charts without requiring the user to re-run the simulation. The full v3 cache contract — including exact field formats, the curve-selection algorithm, and how each UI element consumes these fields — is the authoritative specification in:
 > `user/extend/ResultsPlugins/DatabankMonkeyTest/MTCustomAnalysisImprovementPlan.md`
 
-> As with v1, the cache files are only written when the test fully runs (i.e. not for `LOW TRADES`, `FAILED (NO DATA)`, or `ERROR` outcomes); the plugin falls back to a live recalculation when no matching cache is found.
+> As with v1, the cache files are only written when the `ResultsPluginCache` keyword is present in Input Args **and** the test fully runs (i.e. not for `LOW TRADES`, `FAILED (NO DATA)`, or `ERROR` outcomes); the plugin falls back to a live recalculation when no matching cache is found.

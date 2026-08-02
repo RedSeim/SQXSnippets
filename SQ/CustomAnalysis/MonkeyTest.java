@@ -36,13 +36,18 @@ public class MonkeyTest extends CustomAnalysisMethod {
         } catch (Exception ignored) {}
 
         // Configuration defaults — can be overridden via Input Args field in the project task
-        // as "numMonkeys,percentile,period,replicationMode,shiftingMode" e.g. "500,95,OOS,IndivBars,Random"
+        // as "numMonkeys,percentile,period,replicationMode,shiftingMode" e.g. "500,95,OOS,IndivBars,Random" or "500,95,OOS2,IndivBars,Random"
+        // Additionally, include the keyword "ResultsPluginCache" anywhere in the Input Args to make
+        // the snippet write the cache artifacts (CSV + meta.json) used by the ResultsPlugin
+        // DatabankMonkeyTest. If not present, no cache files are written.
         int numMonkeys = 500;
         double percentile = 95.0;
         byte sampleType = SampleTypes.FullSample;
         String sampleLabel = "FULL";
+        int oosSegmentIndex = -1;
         String replicationMode = "IndivBars";
         String shiftingMode = "Random";
+        boolean writeResultsPluginCache = false;
 
         try {
             String inputArgs = this.getInputArgs();
@@ -65,8 +70,22 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     } else if ("FULL".equals(periodArg)) {
                         sampleType = SampleTypes.FullSample;
                         sampleLabel = "FULL";
+                    } else if (periodArg.startsWith("OOS") && periodArg.length() > 3) {
+                        try {
+                            oosSegmentIndex = Integer.parseInt(periodArg.substring(3).trim());
+                            if (oosSegmentIndex <= 0) {
+                                throw new NumberFormatException("Index must be > 0");
+                            }
+                            sampleType = SampleTypes.OutOfSample;
+                            sampleLabel = "OOS" + oosSegmentIndex;
+                        } catch (Exception e) {
+                            Log.warn("MonkeyTest: invalid period argument '" + periodArg + "'. Valid values: FULL, IS, OOS, OOS1, OOS2, etc. Defaulting to FULL.");
+                            sampleType = SampleTypes.FullSample;
+                            sampleLabel = "FULL";
+                            oosSegmentIndex = -1;
+                        }
                     } else {
-                        Log.warn("MonkeyTest: unrecognized period argument '" + periodArg + "'. Valid values: FULL, IS, OOS. Defaulting to FULL.");
+                        Log.warn("MonkeyTest: unrecognized period argument '" + periodArg + "'. Valid values: FULL, IS, OOS, OOS1, OOS2, etc. Defaulting to FULL.");
                     }
                 }
                 if (args.length >= 4 && !args[3].trim().isEmpty()) {
@@ -91,6 +110,9 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         Log.warn("MonkeyTest: unrecognized shiftingMode argument '" + shfArg + "'. Valid values: Constant, Random. Defaulting to Random.");
                     }
                 }
+                if (inputArgs.toUpperCase().contains("RESULTSPLUGINCACHE")) {
+                    writeResultsPluginCache = true;
+                }
             }
         } catch (Exception e) {
             Log.warn("Could not read input args, using defaults (500 monkeys, 95%, FULL, IndivBars, Random). Reason: " + e.getMessage());
@@ -105,20 +127,28 @@ public class MonkeyTest extends CustomAnalysisMethod {
             Result mainResult = rg.mainResult();
             String mainResultKey = rg.getMainResultKey();
             
-            // Retrieve all trades
-            OrdersList orders = rg.orders().filterWithClone(mainResultKey, Directions.Both, sampleType);
+            // Retrieve trades for period (handling multi-OOS if specified)
+            PeriodOrdersResult periodRes = getOrdersForPeriod(rg, mainResultKey, sampleLabel, sampleType, oosSegmentIndex);
 
-            // Filtered trade list: exclude balance orders and zero-length/zero-PL pseudo-trades.
-            // Used consistently everywhere below so numTrades, curve length, and the
-            // LOW TRADES threshold all agree with each other.
-            ArrayList<Order> tradeOrders = new ArrayList<>();
-            for (int i = 0; i < orders.size(); i++) {
-                Order o = orders.get(i);
-                if (o.isBalanceOrder()) continue;
-                if (o.OpenPrice == o.ClosePrice && Math.abs(o.PL) < 1e-9) continue;
-                tradeOrders.add(o);
-            }
-            int tradeCount = tradeOrders.size();
+            if (periodRes.invalidPeriod) {
+                status = "FAILED (INVALID PERIOD)";
+                Log.warn("MonkeyTest: strategy [" + rg.getName() + "] - " + (periodRes.errorMessage != null ? periodRes.errorMessage : "Invalid period requested: " + sampleLabel) + " -> FAILED (INVALID PERIOD)");
+            } else {
+                OrdersList orders = periodRes.orders;
+
+                // Filtered trade list: exclude balance orders and zero-length/zero-PL pseudo-trades.
+                // Used consistently everywhere below so numTrades, curve length, and the
+                // LOW TRADES threshold all agree with each other.
+                ArrayList<Order> tradeOrders = new ArrayList<>();
+                if (orders != null) {
+                    for (int i = 0; i < orders.size(); i++) {
+                        Order o = orders.get(i);
+                        if (o.isBalanceOrder()) continue;
+                        if (o.OpenPrice == o.ClosePrice && Math.abs(o.PL) < 1e-9) continue;
+                        tradeOrders.add(o);
+                    }
+                }
+                int tradeCount = tradeOrders.size();
 
             // Get the symbol and timeframe from main result key, e.g. "Main: USATECHIDXUSD_ftmo/M15"
             String symbolConnection = "";
@@ -420,6 +450,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 rg.specialValues().setString("MonkeyTestPercentile", String.format(java.util.Locale.US, "%.2f%%", rankPercentile));
 
                 // Write cache artifacts (wide CSV with representative equity curves + meta.json v2)
+                // Only when explicitly requested via the "ResultsPluginCache" keyword in Input Args.
+                if (writeResultsPluginCache) {
                 try {
                     java.io.File cacheDir = new java.io.File("user/extend/ResultsPlugins/DatabankMonkeyTest/cache");
                     cacheDir.mkdirs();
@@ -506,6 +538,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 } catch (Exception cacheEx) {
                     Log.warn("MonkeyTest: could not write cache artifacts for " + rg.getName() + ": " + cacheEx.getMessage());
                 }
+                }
+            }
             }
         } catch (Exception e) {
             status = "ERROR";
@@ -539,7 +573,11 @@ public class MonkeyTest extends CustomAnalysisMethod {
         }
         
         if (!passFilters) {
-            rg.specialValues().setString("FiltersResultFailedReason", "Failed Monkey Test");
+            if ("FAILED (INVALID PERIOD)".equals(status)) {
+                rg.specialValues().setString("FiltersResultFailedReason", "Failed Monkey Test (Invalid Period)");
+            } else {
+                rg.specialValues().setString("FiltersResultFailedReason", "Failed Monkey Test");
+            }
         } else if (existingReason == null || "".equals(existingReason) || "Passed".equals(existingReason)) {
             rg.specialValues().setString("FiltersResultFailedReason", "Passed");
         }
@@ -698,6 +736,120 @@ public class MonkeyTest extends CustomAnalysisMethod {
             return true;
         }
         return false;
+    }
+
+    private static class PeriodOrdersResult {
+        public OrdersList orders = null;
+        public String targetResultKey = null;
+        public boolean invalidPeriod = false;
+        public String errorMessage = null;
+    }
+
+    private PeriodOrdersResult getOrdersForPeriod(ResultsGroup rg, String mainResultKey, String sampleLabel, byte sampleType, int oosSegmentIndex) {
+        PeriodOrdersResult res = new PeriodOrdersResult();
+        
+        if (oosSegmentIndex <= 0) {
+            try {
+                res.orders = rg.orders().filterWithClone(mainResultKey, Directions.Both, sampleType);
+                res.targetResultKey = mainResultKey;
+            } catch (Exception e) {
+                res.errorMessage = "Error filtering orders for " + sampleLabel + ": " + e.getMessage();
+            }
+            return res;
+        }
+        
+        // Numbered OOS period requested, e.g. OOS1, OOS2, OOS3
+        String targetKey = null;
+        
+        try {
+            java.util.List<String> resultKeys = rg.getResultKeys();
+            if (resultKeys != null && !resultKeys.isEmpty()) {
+                String searchStr = "OOS" + oosSegmentIndex;
+                String searchStrSpace = "OOS " + oosSegmentIndex;
+
+                // 1. Direct key match check
+                for (String key : resultKeys) {
+                    String keyUpper = key.toUpperCase();
+                    if (keyUpper.equals(searchStr) || keyUpper.equals(searchStrSpace) ||
+                        keyUpper.endsWith(":" + searchStr) || keyUpper.endsWith("/" + searchStr) ||
+                        keyUpper.endsWith(" " + searchStr) || keyUpper.endsWith(":" + searchStrSpace)) {
+                        targetKey = key;
+                        break;
+                    }
+                }
+
+                // 2. Gather all OOS keys if no direct string match
+                if (targetKey == null) {
+                    ArrayList<String> oosKeys = new ArrayList<>();
+                    for (String key : resultKeys) {
+                        String keyUpper = key.toUpperCase();
+                        if ((keyUpper.contains("OOS") || keyUpper.contains("OUT OF SAMPLE")) && !keyUpper.equals("MAIN") && !keyUpper.startsWith("MAIN:")) {
+                            oosKeys.add(key);
+                        }
+                    }
+                    java.util.Collections.sort(oosKeys);
+
+                    if (oosSegmentIndex <= oosKeys.size()) {
+                        targetKey = oosKeys.get(oosSegmentIndex - 1);
+                    } else if (!oosKeys.isEmpty()) {
+                        res.invalidPeriod = true;
+                        res.errorMessage = "Requested period " + sampleLabel + " but strategy only has " + oosKeys.size() + " OOS segments.";
+                        return res;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.warn("MonkeyTest: error inspecting results map for sub-results: " + e.getMessage());
+        }
+        
+        if (targetKey != null) {
+            try {
+                OrdersList subOrders = rg.orders().filterWithClone(targetKey, Directions.Both, SampleTypes.FullSample);
+                if (subOrders == null || subOrders.size() == 0) {
+                    subOrders = rg.orders().filterWithClone(targetKey, Directions.Both, SampleTypes.OutOfSample);
+                }
+                if (subOrders != null && subOrders.size() > 0) {
+                    res.orders = subOrders;
+                    res.targetResultKey = targetKey;
+                    return res;
+                }
+            } catch (Exception e) {
+                Log.warn("MonkeyTest: could not filter orders with targetKey '" + targetKey + "': " + e.getMessage());
+            }
+        }
+        
+        // 3. Fallback: try filtering main orders if sub-results are indexed by dates or if all OOS orders are in main
+        try {
+            OrdersList allOosOrders = rg.orders().filterWithClone(mainResultKey, Directions.Both, SampleTypes.OutOfSample);
+            if (allOosOrders == null || allOosOrders.size() == 0) {
+                allOosOrders = rg.orders().filterWithClone(mainResultKey, Directions.Both, SampleTypes.FullSample);
+            }
+            
+            if (allOosOrders != null && allOosOrders.size() > 0) {
+                if (oosSegmentIndex > 1 && targetKey == null) {
+                    res.invalidPeriod = true;
+                    res.errorMessage = "Requested period " + sampleLabel + " but strategy only has 1 OOS segment.";
+                    return res;
+                }
+                res.orders = allOosOrders;
+                res.targetResultKey = mainResultKey;
+                return res;
+            }
+        } catch (Exception e) {
+            res.errorMessage = "Error retrieving orders: " + e.getMessage();
+        }
+        
+        if (oosSegmentIndex > 1) {
+            res.invalidPeriod = true;
+            res.errorMessage = "Requested period " + sampleLabel + " but no segment or trades found.";
+        } else {
+            try {
+                res.orders = rg.orders().filterWithClone(mainResultKey, Directions.Both, sampleType);
+                res.targetResultKey = mainResultKey;
+            } catch (Exception ignored) {}
+        }
+        
+        return res;
     }
 
 }

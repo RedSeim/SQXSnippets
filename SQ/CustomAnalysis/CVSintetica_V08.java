@@ -185,8 +185,10 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
 
         // Listas para almacenar beneficios netos sintéticos por cada periodo
         ArrayList<ArrayList<Double>> periodProfits = new ArrayList<>();
+        ArrayList<ArrayList<Double>> periodSharpes = new ArrayList<>();
         for (int p = 0; p < periods.length; p++) {
             periodProfits.add(new ArrayList<Double>());
+            periodSharpes.add(new ArrayList<Double>());
         }
 
         int[] periodSuccessCounts = new int[periods.length];
@@ -254,8 +256,10 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                         for (int p : activePeriodIndices) {
                             double pVal = safeGetNetProfit(res.info.results, periods[p]);
                             int tVal = safeGetTradeCount(res.info.results, periods[p]);
+                            double pSharpe = safeGetSharpeRatio(res.info.results, periods[p]);
 
                             periodProfits.get(p).add(pVal);
+                            periodSharpes.get(p).add(pSharpe);
 
                             // Consideramos ganadora si el net profit es estrictamente mayor que cero y operó en el periodo
                             if (pVal <= 0 || tVal == 0) {
@@ -265,7 +269,7 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                             }
 
                             if (res.index <= 5) {
-                                logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") period " + suffixes[p] + ": Profit=" + pVal + ", Trades=" + tVal);
+                                logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") period " + suffixes[p] + ": Profit=" + pVal + ", Trades=" + tVal + ", Sharpe=" + pSharpe);
                             }
                         }
                     } else {
@@ -305,11 +309,14 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
             // 1. OverfittingRatio (Z-Score con signo)
             double overfittingRatio = (stdev > 0.0) ? (origProfit - mean) / stdev : 0.0;
 
-            // 2. Synthetic_Ratio (Filtro de Ergodicidad)
+            // 2. Synthetic_Ratio (Filtro de Ergodicidad transversal)
             double syntheticRatio = (stdev > 0.0) ? mean / stdev : 0.0;
 
             // 3. Pass_Rate (Survival Rate de 0.0 a 1.0)
             double passRate = (double) periodSuccessCounts[p] / syntheticCount;
+
+            // 4. Sharpe medio de las simulaciones individuales
+            double meanSharpe = mean(periodSharpes.get(p));
 
             String suffix = suffixes[p];
 
@@ -317,7 +324,7 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
             rg.specialValues().set("CA_SynthStdevProfit" + suffix, stdev);
             rg.specialValues().set("CA_OverfittingRatio" + suffix, overfittingRatio);
             rg.specialValues().set("CA_SyntheticRatio" + suffix, syntheticRatio);
-            rg.specialValues().set("CA_SynthMeanSharpe" + suffix, syntheticRatio);
+            rg.specialValues().set("CA_SynthMeanSharpe" + suffix, meanSharpe);
             rg.specialValues().set("CA_PassRate" + suffix, passRate);
             rg.specialValues().set("CA_OriginalProfit" + suffix, origProfit);
             rg.specialValues().set("CA_OriginalTrades" + suffix, originalTrades[p]);
@@ -339,12 +346,13 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
             double stdevFull = stdevSample(periodProfits.get(3), meanFull);
             double origProfitFull = originalProfits[3];
             double zFull = (stdevFull > 0.0) ? (origProfitFull - meanFull) / stdevFull : 0.0;
+            double meanFullSharpe = mean(periodSharpes.get(3));
 
             rg.specialValues().set("CA_SynthMeanProfit", meanFull);
             rg.specialValues().set("CA_SynthStdevProfit", stdevFull);
             rg.specialValues().set("CA_SynthZScoreProfit", zFull);
             rg.specialValues().set("CA_OverfittingRatio", zFull);
-            rg.specialValues().set("CA_SynthMeanSharpe", (stdevFull > 0.0) ? meanFull / stdevFull : 0.0);
+            rg.specialValues().set("CA_SynthMeanSharpe", meanFullSharpe);
             rg.specialValues().set("CA_OriginalProfit", origProfitFull);
             rg.specialValues().set("CA_OriginalTrades", originalTrades[3]);
             rg.specialValues().set("CA_SynthFailCount", periodFailCounts[3]);
@@ -635,6 +643,20 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
             return rg.portfolio()
                     .stats(Directions.Both, PlTypes.Money, sampleType)
                     .getDouble(StatsKey.NET_PROFIT);
+        } catch (Exception e) {
+            return 0.0;
+        }
+    }
+
+    private double safeGetSharpeRatio(ResultsGroup rg, byte sampleType) {
+        try {
+            double val = rg.portfolio()
+                    .stats(Directions.Both, PlTypes.Money, sampleType)
+                    .getDouble(StatsKey.SHARPE_RATIO);
+            if (Double.isNaN(val) || Double.isInfinite(val)) {
+                return 0.0;
+            }
+            return val;
         } catch (Exception e) {
             return 0.0;
         }

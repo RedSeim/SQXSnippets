@@ -31,6 +31,17 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
     private static final int DEFAULT_SYNTHETIC_COUNT = 100;
     private static final String DEFAULT_PREFIX = "XAUUSD_Darwinex_sim";
 
+    // Carpeta de volcado de logs: la del propio snippet, para tener los diagnósticos junto
+    // al código. Se expresa RELATIVA a la raíz de instalación de SQX (que es el working
+    // directory de la JVM), de modo que sigue siendo válida tras reinstalar SQX, mover la
+    // instalación o clonarla en otro equipo. Único sitio a tocar si el destino cambia.
+    private static final String LOG_DIR = "user/extend/Snippets/SQ/CustomAnalysis";
+
+    // Número máximo de partes OOS numeradas que soporta SQX (OutOfSample1..10 == 21..30).
+    private static final int MAX_OOS_PARTS = 10;
+
+    private static volatile boolean logFailureReported = false;
+
     // Execution type interno de los simuladores MetaTrader5 (Hedged y Netted comparten
     // el mismo campo/lógica en checkPriceLevelCorrectness() — no es un proxy de tipo de
     // cuenta, es un eje ortogonal). No es una opción de proyecto/estrategia en SQX (no
@@ -56,6 +67,34 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         BacktestRunInfo info;
         Throwable exception;
         boolean isBadStrategy;
+    }
+
+    /**
+     * Un periodo a analizar: el sample type de SQX, el sufijo con el que se publican sus
+     * SpecialValues, y si realmente existe en esta estrategia (false sólo cuando el usuario
+     * pide explícitamente una parte OOS que esta estrategia no tiene).
+     */
+    private static class PeriodDef {
+        final byte sampleType;
+        final String suffix;
+        final boolean exists;
+
+        PeriodDef(byte sampleType, String suffix, boolean exists) {
+            this.sampleType = sampleType;
+            this.suffix = suffix;
+            this.exists = exists;
+        }
+    }
+
+    /**
+     * Lectura de un periodo concreto. `exists` distingue "SQX no computó estas stats" de
+     * "el periodo existe pero no operó" — conflatir ambos casos falsearía las métricas.
+     */
+    private static class PeriodSample {
+        boolean exists;
+        double profit;
+        double sharpe;
+        int trades;
     }
 
     @Override
@@ -106,33 +145,29 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         String originalSymbol = resolveOriginalSymbol(rg, mainResult);
         logDebug("originalSymbol resolved: " + originalSymbol);
 
-        // Periodos admitidos en SQX y sus sufijos correspondientes
-        byte[] periods = {
-            SampleTypes.InSample,
-            SampleTypes.OutOfSample,
-            SampleTypes.InSampleValidation,
-            SampleTypes.FullSample
-        };
-        String[] suffixes = {"_IS", "_OOS", "_ISV", "_Full"};
+        // El OOS se resuelve UNA sola vez por estrategia y se reutiliza en el run de control
+        // y en los N sintéticos. Antes se resolvía 1+N veces (101 por defecto), cada una
+        // parseando el XML completo y emitiendo ~8 líneas por logDebug, que es
+        // static synchronized y abre/cierra fichero por línea: un punto de serialización
+        // global entre los hilos del executor.
+        final com.strategyquant.tradinglib.strategy.OutOfSample resolvedOOS = resolveOOS(rg);
+        int[] oosPartTags = enumerateOOSPartTags(resolvedOOS);
+        logDebug("[" + rg.getName() + "] OOS parts detected: " + oosPartTags.length);
 
-        // Determinar qué índices de periodo se van a procesar
-        ArrayList<Integer> activePeriodIndices = new ArrayList<Integer>();
-        if (targetPeriod.equals("IS")) {
-            activePeriodIndices.add(0);
-        } else if (targetPeriod.equals("OOS") || targetPeriod.equals("IIS")) {
-            activePeriodIndices.add(1);
-        } else if (targetPeriod.equals("ISV")) {
-            activePeriodIndices.add(2);
-        } else {
-            // FULL o por defecto
-            activePeriodIndices.add(0);
-            activePeriodIndices.add(1);
-            activePeriodIndices.add(2);
-            activePeriodIndices.add(3);
+        ArrayList<PeriodDef> periods = buildPeriodTable(targetPeriod, oosPartTags, rg.getName());
+        int nP = periods.size();
+
+        int fullIdx = -1;
+        for (int i = 0; i < nP; i++) {
+            if (periods.get(i).sampleType == SampleTypes.FullSample) {
+                fullIdx = i;
+                break;
+            }
         }
 
-        double[] originalProfits = new double[periods.length];
-        int[] originalTrades = new int[periods.length];
+        double[] originalProfits = new double[nP];
+        int[] originalTrades = new int[nP];
+        boolean[] originalStatsMissing = new boolean[nP];
 
         int originalRetestFailed = 0;
         int originalRetestBadStrategy = 0;
@@ -148,7 +183,7 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         if (originalSymbol != null && !originalSymbol.trim().isEmpty()) {
             try {
                 logDebug("[" + rg.getName() + "] RETESTING ORIGINAL SYMBOL: " + originalSymbol);
-                BacktestRunInfo info = runBacktestWithInheritedSettings(rg, originalSymbol, true, debugTradesCompare);
+                BacktestRunInfo info = runBacktestWithInheritedSettings(rg, originalSymbol, true, debugTradesCompare, resolvedOOS);
 
                 requestedEngine = info.requestedEngine;
                 normalizedEngine = info.normalizedEngine;
@@ -157,10 +192,22 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                 originalChartEngineApplyFailed = info.chartEngineApplyFailed ? 1 : 0;
 
                 // Extraemos valores reales para cada periodo activo
-                for (int p : activePeriodIndices) {
-                    originalProfits[p] = safeGetNetProfit(info.results, periods[p]);
-                    originalTrades[p] = safeGetTradeCount(info.results, periods[p]);
-                    logDebug("[" + rg.getName() + "] ORIGINAL RESULT FOR PERIOD " + suffixes[p] + " (type=" + periods[p] + "): Profit=" + originalProfits[p] + ", Trades=" + originalTrades[p]);
+                for (int p = 0; p < nP; p++) {
+                    PeriodDef pd = periods.get(p);
+                    if (!pd.exists) {
+                        continue;
+                    }
+
+                    PeriodSample s = readSample(info.results, pd.sampleType);
+                    if (!s.exists) {
+                        originalStatsMissing[p] = true;
+                        logDebug("[" + rg.getName() + "] WARNING: ORIGINAL has no computable stats for period " + pd.suffix + " (type=" + pd.sampleType + "). OverfittingRatio" + pd.suffix + " will not be meaningful.");
+                        continue;
+                    }
+
+                    originalProfits[p] = s.profit;
+                    originalTrades[p] = s.trades;
+                    logDebug("[" + rg.getName() + "] ORIGINAL RESULT FOR PERIOD " + pd.suffix + " (type=" + pd.sampleType + "): Profit=" + s.profit + ", Trades=" + s.trades);
                 }
 
             } catch (BadStrategyException e) {
@@ -168,11 +215,17 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                 originalRetestBadStrategy = 1;
                 originalUsedFallback = 1;
                 originalRetestException = shortError(e);
+                for (int p = 0; p < nP; p++) {
+                    originalStatsMissing[p] = true;
+                }
                 logDebug("[" + rg.getName() + "] ORIGINAL RETEST BadStrategyException: " + originalRetestException);
             } catch (Exception e) {
                 originalRetestFailed = 1;
                 originalUsedFallback = 1;
                 originalRetestException = shortError(e);
+                for (int p = 0; p < nP; p++) {
+                    originalStatsMissing[p] = true;
+                }
                 logDebug("[" + rg.getName() + "] ORIGINAL RETEST Exception: " + originalRetestException);
             }
         } else {
@@ -180,21 +233,25 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
             originalUsedFallback = 1;
             originalSymbol = "N/A";
             originalRetestException = "Original symbol could not be resolved";
+            for (int p = 0; p < nP; p++) {
+                originalStatsMissing[p] = true;
+            }
             logDebug("[" + rg.getName() + "] ORIGINAL RETEST FAILED: symbol empty");
         }
 
         // Listas para almacenar beneficios netos sintéticos por cada periodo
         ArrayList<ArrayList<Double>> periodProfits = new ArrayList<>();
         ArrayList<ArrayList<Double>> periodSharpes = new ArrayList<>();
-        for (int p = 0; p < periods.length; p++) {
+        for (int p = 0; p < nP; p++) {
             periodProfits.add(new ArrayList<Double>());
             periodSharpes.add(new ArrayList<Double>());
         }
 
-        int[] periodSuccessCounts = new int[periods.length];
-        int[] periodFailCounts = new int[periods.length];
-        int[] periodBadStrategyCounts = new int[periods.length];
-        int[] periodExceptionCounts = new int[periods.length];
+        int[] periodSuccessCounts = new int[nP];
+        int[] periodFailCounts = new int[nP];
+        int[] periodBadStrategyCounts = new int[nP];
+        int[] periodExceptionCounts = new int[nP];
+        int[] periodMissingStatsCounts = new int[nP];
 
         int synthSameBarErrorCount = 0;
         int synthChartEngineApplyFailedCount = 0;
@@ -217,7 +274,7 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                     res.index = index;
                     res.symbol = synthSymbol;
                     try {
-                        res.info = runBacktestWithInheritedSettings(rg, synthSymbol, false, debugTradesCompareFinal);
+                        res.info = runBacktestWithInheritedSettings(rg, synthSymbol, false, debugTradesCompareFinal, resolvedOOS);
                     } catch (BadStrategyException e) {
                         res.isBadStrategy = true;
                         res.exception = e;
@@ -253,23 +310,37 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                         }
 
                         // Procesamos únicamente los periodos activos de manera independiente
-                        for (int p : activePeriodIndices) {
-                            double pVal = safeGetNetProfit(res.info.results, periods[p]);
-                            int tVal = safeGetTradeCount(res.info.results, periods[p]);
-                            double pSharpe = safeGetSharpeRatio(res.info.results, periods[p]);
+                        for (int p = 0; p < nP; p++) {
+                            PeriodDef pd = periods.get(p);
+                            if (!pd.exists) {
+                                continue;
+                            }
 
-                            periodProfits.get(p).add(pVal);
-                            periodSharpes.get(p).add(pSharpe);
+                            PeriodSample s = readSample(res.info.results, pd.sampleType);
+
+                            // Stats no computadas != periodo sin operaciones. Un hueco de
+                            // medición no puede contarse como pérdida: se excluye de la
+                            // muestra y del denominador del Pass Rate.
+                            if (!s.exists) {
+                                periodMissingStatsCounts[p]++;
+                                if (res.index <= 5) {
+                                    logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") period " + pd.suffix + ": NO COMPUTABLE STATS, excluded from sample");
+                                }
+                                continue;
+                            }
+
+                            periodProfits.get(p).add(s.profit);
+                            periodSharpes.get(p).add(s.sharpe);
 
                             // Consideramos ganadora si el net profit es estrictamente mayor que cero y operó en el periodo
-                            if (pVal <= 0 || tVal == 0) {
+                            if (s.profit <= 0 || s.trades == 0) {
                                 periodFailCounts[p]++;
                             } else {
                                 periodSuccessCounts[p]++;
                             }
 
                             if (res.index <= 5) {
-                                logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") period " + suffixes[p] + ": Profit=" + pVal + ", Trades=" + tVal + ", Sharpe=" + pSharpe);
+                                logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") period " + pd.suffix + ": Profit=" + s.profit + ", Trades=" + s.trades + ", Sharpe=" + s.sharpe);
                             }
                         }
                     } else {
@@ -277,7 +348,8 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                         if (res.isBadStrategy) {
                             logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") BadStrategyException: " + lastSyntheticException);
 
-                            for (int p : activePeriodIndices) {
+                            for (int p = 0; p < nP; p++) {
+                                if (!periods.get(p).exists) continue;
                                 periodFailCounts[p]++;
                                 periodBadStrategyCounts[p]++;
                             }
@@ -287,7 +359,8 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                             }
                         } else {
                             logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") Exception: " + lastSyntheticException);
-                            for (int p : activePeriodIndices) {
+                            for (int p = 0; p < nP; p++) {
+                                if (!periods.get(p).exists) continue;
                                 periodFailCounts[p]++;
                                 periodExceptionCounts[p]++;
                             }
@@ -300,32 +373,86 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         }
 
         // Calculamos estadísticas por periodo activo y guardamos en SpecialValues
-        for (int p : activePeriodIndices) {
+        boolean separateMetricsSuspect = false;
+        int existingPeriodCount = 0;
+        int noDataPeriodCount = 0;
+
+        for (int p = 0; p < nP; p++) {
+            PeriodDef pd = periods.get(p);
+            String suffix = pd.suffix;
+
+            // Este periodo forma parte del alcance del run actual: se limpia cualquier
+            // valor residual de un run anterior antes de recalcular, para no mostrar datos
+            // de un test viejo como si fueran de este test (ver clearPeriodSynthKeys).
+            clearPeriodSynthKeys(rg, suffix);
+
+            // Parte OOS pedida explícitamente que esta estrategia no tiene: no publicamos
+            // ninguna métrica (las columnas mostrarán N/A) en lugar de fabricar un
+            // PassRate 0% / profit 0 que parecería un resultado real y malo.
+            if (!pd.exists) {
+                rg.specialValues().set("CA_SynthPartMissing" + suffix, 1);
+                continue;
+            }
+
+            if (periodMissingStatsCounts[p] > 0) {
+                separateMetricsSuspect = true;
+                logDebug("[" + rg.getName() + "] WARNING: " + periodMissingStatsCounts[p] + " of " + syntheticCount + " synthetic runs had no computable stats for " + suffix + ". Likely cause: the global setting 'ComputeSeparateMetrics' is disabled.");
+            }
+
             ArrayList<Double> profitsList = periodProfits.get(p);
+            // Si ninguna simulación sintética produjo estadísticas computables (p. ej. el
+            // prefijo/nombre de la data sintética no existe), profitsList queda vacía: mean()
+            // y stdevSample() devolverían 0.0 por diseño, un valor que parece "medido y es
+            // cero" en vez de "no hay nada que medir".
+            boolean syntheticStatsAvailable = !profitsList.isEmpty();
+            existingPeriodCount++;
+            if (!syntheticStatsAvailable) {
+                noDataPeriodCount++;
+            }
             double mean = mean(profitsList);
             double stdev = stdevSample(profitsList, mean);
             double origProfit = originalProfits[p];
 
-            // 1. OverfittingRatio (Z-Score con signo)
-            double overfittingRatio = (stdev > 0.0) ? (origProfit - mean) / stdev : 0.0;
+            // 1. OverfittingRatio (Z-Score con signo). Si el profit original no es fiable
+            // (run de control falló o el periodo no tuvo stats) o no hay datos sintéticos
+            // con los que compararlo, no se publica: un 0 falso produciría un Z-Score que
+            // parece válido pero no compara nada real.
+            boolean overfittingReliable = !originalStatsMissing[p] && syntheticStatsAvailable;
+            double overfittingRatio = (overfittingReliable && stdev > 0.0) ? (origProfit - mean) / stdev : 0.0;
 
             // 2. Synthetic_Ratio (Filtro de Ergodicidad transversal)
             double syntheticRatio = (stdev > 0.0) ? mean / stdev : 0.0;
 
-            // 3. Pass_Rate (Survival Rate de 0.0 a 1.0)
-            double passRate = (double) periodSuccessCounts[p] / syntheticCount;
+            // 3. Pass_Rate (Survival Rate de 0.0 a 1.0). El denominador son las simulaciones
+            // realmente evaluadas: en cualquier escenario que funciona hoy missing==0 y el
+            // valor es idéntico al anterior.
+            int evaluated = syntheticCount - periodMissingStatsCounts[p];
+            double passRate = (evaluated > 0) ? ((double) periodSuccessCounts[p] / evaluated) : 0.0;
 
             // 4. Sharpe medio de las simulaciones individuales
             double meanSharpe = mean(periodSharpes.get(p));
 
-            String suffix = suffixes[p];
+            if (originalStatsMissing[p]) {
+                rg.specialValues().set("CA_SynthOriginalStatsMissing" + suffix, 1);
+            }
+            if (!syntheticStatsAvailable) {
+                rg.specialValues().set("CA_SynthNoData" + suffix, 1);
+            }
+            rg.specialValues().set("CA_SynthMissingStatsCount" + suffix, periodMissingStatsCounts[p]);
 
-            rg.specialValues().set("CA_SynthMeanProfit" + suffix, mean);
-            rg.specialValues().set("CA_SynthStdevProfit" + suffix, stdev);
-            rg.specialValues().set("CA_OverfittingRatio" + suffix, overfittingRatio);
-            rg.specialValues().set("CA_SyntheticRatio" + suffix, syntheticRatio);
-            rg.specialValues().set("CA_SynthMeanSharpe" + suffix, meanSharpe);
-            rg.specialValues().set("CA_PassRate" + suffix, passRate);
+            // Media, desviación, ratio sintético, sharpe medio y pass rate dependen todos de
+            // profitsList/periodSharpes: si ninguna simulación produjo estadísticas, no se
+            // publican (las columnas mostrarán N/A) en vez de fabricar ceros engañosos.
+            if (syntheticStatsAvailable) {
+                rg.specialValues().set("CA_SynthMeanProfit" + suffix, mean);
+                rg.specialValues().set("CA_SynthStdevProfit" + suffix, stdev);
+                rg.specialValues().set("CA_SyntheticRatio" + suffix, syntheticRatio);
+                rg.specialValues().set("CA_SynthMeanSharpe" + suffix, meanSharpe);
+                rg.specialValues().set("CA_PassRate" + suffix, passRate);
+            }
+            if (overfittingReliable) {
+                rg.specialValues().set("CA_OverfittingRatio" + suffix, overfittingRatio);
+            }
             rg.specialValues().set("CA_OriginalProfit" + suffix, origProfit);
             rg.specialValues().set("CA_OriginalTrades" + suffix, originalTrades[p]);
             rg.specialValues().set("CA_SynthSuccessCount" + suffix, periodSuccessCounts[p]);
@@ -341,28 +468,41 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         }
 
         // Guardar variables de retrocompatibilidad (Full Sample)
-        if (targetPeriod.equals("FULL")) {
-            double meanFull = mean(periodProfits.get(3));
-            double stdevFull = stdevSample(periodProfits.get(3), meanFull);
-            double origProfitFull = originalProfits[3];
-            double zFull = (stdevFull > 0.0) ? (origProfitFull - meanFull) / stdevFull : 0.0;
-            double meanFullSharpe = mean(periodSharpes.get(3));
+        if (targetPeriod.equals("FULL") && fullIdx >= 0) {
+            clearFullSynthKeys(rg);
+            boolean syntheticStatsAvailableFull = !periodProfits.get(fullIdx).isEmpty();
+            double meanFull = mean(periodProfits.get(fullIdx));
+            double stdevFull = stdevSample(periodProfits.get(fullIdx), meanFull);
+            double origProfitFull = originalProfits[fullIdx];
+            boolean overfittingReliableFull = !originalStatsMissing[fullIdx] && syntheticStatsAvailableFull;
+            double zFull = (overfittingReliableFull && stdevFull > 0.0) ? (origProfitFull - meanFull) / stdevFull : 0.0;
+            double meanFullSharpe = mean(periodSharpes.get(fullIdx));
 
-            rg.specialValues().set("CA_SynthMeanProfit", meanFull);
-            rg.specialValues().set("CA_SynthStdevProfit", stdevFull);
-            rg.specialValues().set("CA_SynthZScoreProfit", zFull);
-            rg.specialValues().set("CA_OverfittingRatio", zFull);
-            rg.specialValues().set("CA_SynthMeanSharpe", meanFullSharpe);
+            if (syntheticStatsAvailableFull) {
+                rg.specialValues().set("CA_SynthMeanProfit", meanFull);
+                rg.specialValues().set("CA_SynthStdevProfit", stdevFull);
+                rg.specialValues().set("CA_SynthMeanSharpe", meanFullSharpe);
+            } else {
+                rg.specialValues().set("CA_SynthNoData", 1);
+            }
+            if (overfittingReliableFull) {
+                rg.specialValues().set("CA_SynthZScoreProfit", zFull);
+                rg.specialValues().set("CA_OverfittingRatio", zFull);
+            }
             rg.specialValues().set("CA_OriginalProfit", origProfitFull);
-            rg.specialValues().set("CA_OriginalTrades", originalTrades[3]);
-            rg.specialValues().set("CA_SynthFailCount", periodFailCounts[3]);
-            rg.specialValues().set("CA_SynthSuccessCount", periodSuccessCounts[3]);
+            rg.specialValues().set("CA_OriginalTrades", originalTrades[fullIdx]);
+            rg.specialValues().set("CA_SynthFailCount", periodFailCounts[fullIdx]);
+            rg.specialValues().set("CA_SynthSuccessCount", periodSuccessCounts[fullIdx]);
 
-            rg.specialValues().set("CA_SynthBadStrategyCount", periodBadStrategyCounts[3]);
-            rg.specialValues().set("CA_SynthExceptionCount", periodExceptionCounts[3]);
+            rg.specialValues().set("CA_SynthBadStrategyCount", periodBadStrategyCounts[fullIdx]);
+            rg.specialValues().set("CA_SynthExceptionCount", periodExceptionCounts[fullIdx]);
         }
 
         // Guardado de control
+        rg.specialValues().set("CA_SynthTargetPeriod", targetPeriod);
+        rg.specialValues().set("CA_SynthOOSPartsAvailable", oosPartTags.length);
+        rg.specialValues().set("CA_SynthOOSResolved", resolvedOOS != null ? 1 : 0);
+        rg.specialValues().set("CA_SynthSeparateMetricsSuspect", separateMetricsSuspect ? 1 : 0);
         rg.specialValues().set("CA_SynthRequestedCount", syntheticCount);
         rg.specialValues().set("CA_SynthSameBarErrorCount", synthSameBarErrorCount);
         rg.specialValues().set("CA_SynthChartEngineApplyFailedCount", synthChartEngineApplyFailedCount);
@@ -383,6 +523,64 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         rg.specialValues().set("CA_LastSyntheticException", lastSyntheticException);
         rg.specialValues().set("CA_LastSyntheticSimulatorClass", lastSyntheticSimulatorClass);
 
+        // Marca visual en la columna "Filters result" (SQ.Columns.Databanks.FiltersResult):
+        // si el test no pudo evaluarse de forma fiable, se muestra FAILED con el motivo en el
+        // tooltip en vez de dejar la estrategia sin ningún indicador visual del problema. No
+        // excluye la estrategia del databank (filterStrategy sigue devolviendo true): es un
+        // fallo de configuración/infraestructura del test, no un juicio sobre la estrategia.
+        //
+        // Prioridad de diagnóstico (el primero que aplique gana):
+        // 1. Ningún periodo solicitado existe en esta estrategia (p.ej. se pidió OOS5 y sólo
+        //    tiene 2 partes OOS) - ni siquiera se llegó a evaluar nada.
+        // 2. Falla el run de control - con sub-causa (símbolo no resuelto / BadStrategyException
+        //    / excepción genérica).
+        // 3. Ninguna simulación sintética produjo datos - con la causa dominante entre las N
+        //    simulaciones (ComputeSeparateMetrics desactivado / errores same-bar / BadStrategyException
+        //    / excepción genérica / mezcla sin causa dominante).
+        boolean noPeriodExists = existingPeriodCount == 0;
+        boolean allSyntheticDataMissing = existingPeriodCount > 0 && noDataPeriodCount == existingPeriodCount;
+        boolean testCouldNotBeEvaluated = noPeriodExists || (originalRetestFailed == 1) || allSyntheticDataMissing;
+
+        if (testCouldNotBeEvaluated) {
+            String reason;
+            if (noPeriodExists) {
+                reason = "Requested period \"" + sanitizeForTooltip(targetPeriod) + "\" does not exist for this strategy.";
+            } else if (originalRetestFailed == 1) {
+                if (originalSymbol.equals("N/A")) {
+                    reason = "The original symbol could not be resolved.";
+                } else if (originalRetestBadStrategy == 1) {
+                    reason = "Control backtest threw a BadStrategyException (" + sanitizeForTooltip(originalRetestException) + ").";
+                } else {
+                    reason = "Control backtest failed (" + sanitizeForTooltip(originalRetestException) + ").";
+                }
+            } else {
+                int repIdx = -1;
+                for (int p = 0; p < nP; p++) {
+                    if (periods.get(p).exists) {
+                        repIdx = p;
+                        break;
+                    }
+                }
+
+                if (repIdx >= 0 && periodMissingStatsCounts[repIdx] == syntheticCount) {
+                    reason = "All " + syntheticCount + " synthetics ran without separate stats (check \"ComputeSeparateMetrics\").";
+                } else if (synthSameBarErrorCount >= syntheticCount) {
+                    reason = "All " + syntheticCount + " synthetics failed: too many trades on the same bar.";
+                } else if (repIdx >= 0 && periodBadStrategyCounts[repIdx] == syntheticCount) {
+                    reason = "All " + syntheticCount + " synthetics failed with a BadStrategyException.";
+                } else if (repIdx >= 0 && periodExceptionCounts[repIdx] == syntheticCount) {
+                    reason = "All " + syntheticCount + " synthetics failed (" + sanitizeForTooltip(lastSyntheticException) + "). Check prefix \"" + sanitizeForTooltip(synthPrefix) + "\".";
+                } else {
+                    reason = "None of " + syntheticCount + " synthetics (prefix \"" + sanitizeForTooltip(synthPrefix) + "\") produced data.";
+                }
+            }
+            rg.specialValues().set(SpecialValues.FiltersResultFailedReason, reason);
+        } else {
+            // Limpia un veredicto FAILED de un run anterior: sin esto, una estrategia que
+            // falló una vez y luego se testea con éxito quedaría marcada FAILED para siempre.
+            rg.specialValues().set(SpecialValues.FiltersResultFailedReason, SpecialValues.FiltersResultPassed);
+        }
+
         return true;
     }
 
@@ -390,6 +588,17 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
      * Ejecuta un nuevo backtest intentando heredar la configuración original.
      */
     private BacktestRunInfo runBacktestWithInheritedSettings(ResultsGroup source, String targetSymbol, boolean isControlRun, boolean debugTradesCompare) throws Exception {
+        return runBacktestWithInheritedSettings(source, targetSymbol, isControlRun, debugTradesCompare, null);
+    }
+
+    /**
+     * @param preResolvedOOS OOS ya resuelto por el llamante para no repetir el parseo del XML
+     *                       en cada uno de los N backtests. Si es null se resuelve aquí.
+     *                       SÓLO SE LEE: mutarlo (addRange/setFromXML) renumeraría las partes
+     *                       y corrompería todas las ejecuciones concurrentes que lo comparten.
+     */
+    private BacktestRunInfo runBacktestWithInheritedSettings(ResultsGroup source, String targetSymbol, boolean isControlRun, boolean debugTradesCompare,
+                                                             com.strategyquant.tradinglib.strategy.OutOfSample preResolvedOOS) throws Exception {
         logDebug("[" + source.getName() + "] [runBacktestWithInheritedSettings] targetSymbol: " + targetSymbol);
 
         Result mainResult = source.mainResult();
@@ -565,8 +774,8 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
 
         com.strategyquant.tradinglib.strategy.OutOfSample oosConfig = null;
         try {
-            oosConfig = resolveOOS(source);
-            logDebug("[" + source.getName() + "] pre-backtest resolveOOS is null: " + (oosConfig == null));
+            oosConfig = (preResolvedOOS != null) ? preResolvedOOS : resolveOOS(source);
+            logDebug("[" + source.getName() + "] pre-backtest OOS is null: " + (oosConfig == null) + " (preResolved: " + (preResolvedOOS != null) + ")");
             if (oosConfig != null) {
                 logDebug("[" + source.getName() + "] Injecting OOS into settings BEFORE backtest: " + oosConfig.toString());
                 settings.set(SettingsKeys.OutOfSample, oosConfig);
@@ -638,46 +847,170 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         return info;
     }
 
-    private double safeGetNetProfit(ResultsGroup rg, byte sampleType) {
-        try {
-            return rg.portfolio()
-                    .stats(Directions.Both, PlTypes.Money, sampleType)
-                    .getDouble(StatsKey.NET_PROFIT);
-        } catch (Exception e) {
-            return 0.0;
-        }
-    }
+    /**
+     * Lee de una vez profit, trades y sharpe de un periodo.
+     *
+     * Usa statsOrNull() en lugar de stats(): stats() lanza StatsDontExistException cuando la
+     * combinación no fue computada, y capturar esa excepción devolviendo 0.0 haría
+     * indistinguible "SQX no computó estas stats" de "el periodo existe y no operó" — que
+     * aguas abajo se contaría como pérdida y falsearía mean, stdev y PassRate.
+     */
+    private PeriodSample readSample(ResultsGroup rg, byte sampleType) {
+        PeriodSample s = new PeriodSample();
 
-    private double safeGetSharpeRatio(ResultsGroup rg, byte sampleType) {
         try {
-            double val = rg.portfolio()
-                    .stats(Directions.Both, PlTypes.Money, sampleType)
-                    .getDouble(StatsKey.SHARPE_RATIO);
-            if (Double.isNaN(val) || Double.isInfinite(val)) {
-                return 0.0;
+            SQStats st = rg.portfolio().statsOrNull(Directions.Both, PlTypes.Money, sampleType);
+            if (st == null) {
+                return s;
             }
-            return val;
+
+            s.exists = true;
+            s.profit = st.getDouble(StatsKey.NET_PROFIT);
+            s.trades = st.getInt(StatsKey.NUMBER_OF_TRADES);
+
+            double sharpe = st.getDouble(StatsKey.SHARPE_RATIO);
+            s.sharpe = (Double.isNaN(sharpe) || Double.isInfinite(sharpe)) ? 0.0 : sharpe;
         } catch (Exception e) {
-            return 0.0;
+            s.exists = false;
         }
+
+        return s;
     }
 
-    private int safeGetTradeCount(ResultsGroup rg, byte sampleType) {
+    /**
+     * Enumera los sample types OOS numerados (OutOfSample1..10 == 21..30) realmente presentes
+     * en la configuración OOS de la estrategia.
+     *
+     * Se leen los tags almacenados en vez de usar getPartsCount() porque el argumento de ese
+     * método es un SELECTOR DE CATEGORÍA (sólo reconoce OutOfSample e InSampleValidation);
+     * pasarle un tag numerado como 21 devuelve 0.
+     */
+    private int[] enumerateOOSPartTags(com.strategyquant.tradinglib.strategy.OutOfSample oos) {
+        java.util.TreeSet<Integer> tags = new java.util.TreeSet<Integer>();
+
+        if (oos == null) {
+            return new int[0];
+        }
+
         try {
-            return rg.portfolio()
-                    .stats(Directions.Both, PlTypes.Money, sampleType)
-                    .getInt(StatsKey.NUMBER_OF_TRADES);
+            int ranges = oos.getRangesCount();
+            for (int i = 0; i < ranges; i++) {
+                byte t = oos.getSampleType(i);
+                if (t > SampleTypes.OutOfSample && t <= (byte) (SampleTypes.OutOfSample + MAX_OOS_PARTS)) {
+                    tags.add((int) t);
+                }
+            }
+            logDebug("[enumerateOOSPartTags] ranges=" + ranges + ", getPartsCount(OutOfSample)=" + oos.getPartsCount(SampleTypes.OutOfSample) + ", enumerated=" + tags.size());
         } catch (Exception e) {
-            return 0;
+            logDebug("[enumerateOOSPartTags] ERROR: " + shortError(e));
         }
+
+        int[] out = new int[tags.size()];
+        int k = 0;
+        for (Integer v : tags) {
+            out[k++] = v;
+        }
+        return out;
     }
 
-    private double safeGetNetProfit(ResultsGroup rg) {
-        return safeGetNetProfit(rg, SampleTypes.FullSample);
+    /**
+     * Construye la lista de periodos a analizar según el argumento de periodo objetivo.
+     * Todas las entradas devueltas están activas por construcción.
+     */
+    private ArrayList<PeriodDef> buildPeriodTable(String targetPeriod, int[] oosPartTags, String strategyName) {
+        ArrayList<PeriodDef> list = new ArrayList<PeriodDef>();
+
+        int requestedPart = parseOOSPartNumber(targetPeriod);
+        if (requestedPart > 0) {
+            byte tag = (byte) (SampleTypes.OutOfSample + requestedPart);
+            boolean exists = containsTag(oosPartTags, tag);
+            if (!exists) {
+                logDebug("[" + strategyName + "] WARNING: requested OOS part " + requestedPart + " does not exist in this strategy (available OOS parts: " + oosPartTags.length + "). No metrics will be published for _OOS" + requestedPart + ".");
+            }
+            list.add(new PeriodDef(tag, "_OOS" + requestedPart, exists));
+            return list;
+        }
+
+        if (targetPeriod.equals("IS")) {
+            list.add(new PeriodDef(SampleTypes.InSample, "_IS", true));
+            return list;
+        }
+        if (targetPeriod.equals("OOS") || targetPeriod.equals("IIS")) {
+            list.add(new PeriodDef(SampleTypes.OutOfSample, "_OOS", true));
+            return list;
+        }
+        if (targetPeriod.equals("ISV")) {
+            list.add(new PeriodDef(SampleTypes.InSampleValidation, "_ISV", true));
+            return list;
+        }
+
+        // FULL, o cualquier token no reconocido (mismo comportamiento por defecto que antes).
+        // Se mantiene el orden histórico de los 4 periodos base.
+        list.add(new PeriodDef(SampleTypes.InSample, "_IS", true));
+        list.add(new PeriodDef(SampleTypes.OutOfSample, "_OOS", true));
+        list.add(new PeriodDef(SampleTypes.InSampleValidation, "_ISV", true));
+        list.add(new PeriodDef(SampleTypes.FullSample, "_Full", true));
+
+        // Auto-expansión a las partes OOS numeradas. Con una sola parte no se emite _OOS1:
+        // SQX copia las stats de OOS1 sobre OOS (copyStats 21->20), así que serían columnas
+        // duplicadas exactamente. No cuesta backtests adicionales: los sintéticos ya
+        // ejecutados se muestrean una vez por periodo.
+        if (oosPartTags.length >= 2) {
+            for (int tag : oosPartTags) {
+                list.add(new PeriodDef((byte) tag, "_OOS" + (tag - SampleTypes.OutOfSample), true));
+            }
+        } else if (oosPartTags.length == 1) {
+            logDebug("[" + strategyName + "] Single OOS part: _OOS1 omitted, it would be identical to _OOS by SQX design.");
+        }
+
+        return list;
     }
 
-    private int safeGetTradeCount(ResultsGroup rg) {
-        return safeGetTradeCount(rg, SampleTypes.FullSample);
+    /**
+     * Devuelve 1..10 para "OOS1".."OOS10" (targetPeriod ya viene en mayúsculas), o -1 si no
+     * es una parte OOS numerada. Fuera de rango o mal formado devuelve -1, con lo que el
+     * llamante cae al comportamiento FULL por defecto, igual que antes, pero ahora se registra.
+     */
+    private int parseOOSPartNumber(String targetPeriod) {
+        if (targetPeriod == null) {
+            return -1;
+        }
+
+        String s = targetPeriod.trim();
+        if (s.startsWith("_")) {
+            s = s.substring(1);
+        }
+        if (!s.startsWith("OOS") || s.length() <= 3) {
+            return -1;
+        }
+
+        String digits = s.substring(3);
+        for (int i = 0; i < digits.length(); i++) {
+            if (!Character.isDigit(digits.charAt(i))) {
+                return -1;
+            }
+        }
+
+        try {
+            int n = Integer.parseInt(digits);
+            if (n >= 1 && n <= MAX_OOS_PARTS) {
+                return n;
+            }
+            logDebug("WARNING: OOS part number out of range 1.." + MAX_OOS_PARTS + ": '" + targetPeriod + "' -> falling back to FULL");
+        } catch (NumberFormatException e) {
+            logDebug("WARNING: could not parse OOS part number from '" + targetPeriod + "' -> falling back to FULL");
+        }
+
+        return -1;
+    }
+
+    private boolean containsTag(int[] tags, byte tag) {
+        for (int t : tags) {
+            if (t == tag) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean containsTooManyTradesSameBar(Throwable e) {
@@ -719,6 +1052,18 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         }
 
         return cls + ": " + msg;
+    }
+
+    // El tooltip de "Filters result" (FiltersResult.java) inserta este texto dentro de un
+    // atributo delimitado por comillas simples sin escapar (tooltip='...'). Una comilla simple
+    // en el texto cierra el atributo de forma prematura y trunca todo lo que viene después,
+    // sin previo aviso y sin relación con la longitud del mensaje. Se sustituye por comilla
+    // doble para no perder la referencia visual (p.ej. nombres de símbolo entre comillas).
+    private String sanitizeForTooltip(String s) {
+        if (s == null) {
+            return "";
+        }
+        return s.replace('\'', '"');
     }
 
     // =========================================================
@@ -1122,6 +1467,42 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
     }
 
     // =========================================================
+    // SpecialValues cleanup helpers
+    // =========================================================
+
+    // specialValues() persiste entre ejecuciones del Custom Analysis (está asociado a la
+    // estrategia, no al run). SettingsMap no expone remove(String), sólo set(); escribir
+    // null en una clave produce el mismo resultado que "clave ausente" para las Databank
+    // Columns (todas comprueban "if (v == null) return NOT_AVAILABLE"). Sin este barrido,
+    // un periodo cuyo test falla en el run actual seguiría mostrando los valores de un
+    // test anterior exitoso, como si fueran del run actual.
+    private static final String[] PERIOD_SYNTH_KEYS = {
+        "CA_SynthPartMissing", "CA_SynthOriginalStatsMissing", "CA_SynthNoData",
+        "CA_SynthMissingStatsCount", "CA_SynthMeanProfit", "CA_SynthStdevProfit",
+        "CA_SyntheticRatio", "CA_SynthMeanSharpe", "CA_PassRate", "CA_OverfittingRatio",
+        "CA_OriginalProfit", "CA_OriginalTrades", "CA_SynthSuccessCount", "CA_SynthFailCount",
+        "CA_SinteticNetProfits"
+    };
+
+    private void clearPeriodSynthKeys(ResultsGroup rg, String suffix) {
+        for (String base : PERIOD_SYNTH_KEYS) {
+            rg.specialValues().set(base + suffix, null);
+        }
+    }
+
+    private static final String[] FULL_SYNTH_KEYS = {
+        "CA_SynthMeanProfit", "CA_SynthStdevProfit", "CA_SynthMeanSharpe", "CA_SynthZScoreProfit",
+        "CA_OverfittingRatio", "CA_SynthNoData", "CA_OriginalProfit", "CA_OriginalTrades",
+        "CA_SynthFailCount", "CA_SynthSuccessCount", "CA_SynthBadStrategyCount", "CA_SynthExceptionCount"
+    };
+
+    private void clearFullSynthKeys(ResultsGroup rg) {
+        for (String base : FULL_SYNTH_KEYS) {
+            rg.specialValues().set(base, null);
+        }
+    }
+
+    // =========================================================
     // Stats helpers
     // =========================================================
 
@@ -1163,12 +1544,46 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
 
     private static synchronized void logDebug(String msg) {
         try {
-            java.io.FileWriter fw = new java.io.FileWriter("g:\\Software\\StrategyQuantX\\144\\user\\extend\\Snippets\\SQ\\CustomAnalysis\\CVSintetica_debug.log", true);
+            java.io.FileWriter fw = new java.io.FileWriter(logFile("CVSintetica_debug.log"), true);
             java.io.PrintWriter pw = new java.io.PrintWriter(fw);
             String timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new java.util.Date());
             pw.println("[" + timestamp + "] [Thread-" + Thread.currentThread().getId() + "] " + msg);
             pw.close();
             fw.close();
+        } catch (Exception e) {
+            reportLogFailureOnce(e);
+        }
+    }
+
+    /**
+     * Resuelve el fichero de log dentro de LOG_DIR, creando la carpeta si hiciera falta.
+     * LOG_DIR es relativo: el working directory de la JVM de SQX es la raíz de la
+     * instalación (mismo supuesto que ya usa MonkeyTest.java con "user/data/History/..."),
+     * de modo que la ruta sigue siendo válida tras reinstalar SQX, mover la instalación
+     * o clonarla en otro equipo.
+     */
+    private static java.io.File logFile(String name) {
+        java.io.File dir = new java.io.File(LOG_DIR);
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+        return new java.io.File(dir, name);
+    }
+
+    /**
+     * Los escritores de log ignoran sus errores para que un problema de logging nunca
+     * tumbe un análisis. Pero ignorarlos *en silencio* es justo lo que hizo que la ruta
+     * absoluta obsoleta pasara desapercibida, así que el primer fallo sí se reporta.
+     */
+    private static void reportLogFailureOnce(Exception e) {
+        if (logFailureReported) {
+            return;
+        }
+        logFailureReported = true;
+        try {
+            System.err.println("[CVSintetica_V08] WARNING: no se pudo escribir el log en '"
+                    + new java.io.File(LOG_DIR).getAbsolutePath() + "': " + e
+                    + " (los siguientes fallos de logging se omiten)");
         } catch (Exception ignored) {}
     }
 
@@ -1272,10 +1687,12 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
     }
 
     private static synchronized void logTradesCompareBlock(String block) {
-        try (java.io.FileWriter fw = new java.io.FileWriter("g:\\Software\\StrategyQuantX\\144\\user\\extend\\Snippets\\SQ\\CustomAnalysis\\CVSintetica_trades_compare.log", true);
+        try (java.io.FileWriter fw = new java.io.FileWriter(logFile("CVSintetica_trades_compare.log"), true);
              java.io.PrintWriter pw = new java.io.PrintWriter(fw)) {
             pw.print(block);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            reportLogFailureOnce(e);
+        }
     }
 
     private void dumpTrades(StringBuilder sb, String prefix, String strategyName, String targetSymbol, ResultsGroup rg, String resultKey, byte sampleType) {

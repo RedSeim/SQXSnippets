@@ -70,6 +70,17 @@ public class SynthFailCount extends DatabankColumn {
         if (sampleType == SampleTypes.InSample) return "_IS";
         if (sampleType == SampleTypes.OutOfSample) return "_OOS";
         if (sampleType == SampleTypes.InSampleValidation) return "_ISV";
+
+        // Partes numeradas: OutOfSample1..10 == 21..30, InSampleValidation1..10 == 41..50.
+        // Sin estas ramas caerían en el "_Full" final y la columna mostraría los valores de
+        // Full Sample como si fueran los de la parte seleccionada.
+        if (sampleType > SampleTypes.OutOfSample && sampleType <= (byte) (SampleTypes.OutOfSample + 10)) {
+            return "_OOS" + (sampleType - SampleTypes.OutOfSample);
+        }
+        if (sampleType > SampleTypes.InSampleValidation && sampleType <= (byte) (SampleTypes.InSampleValidation + 10)) {
+            return "_ISV" + (sampleType - SampleTypes.InSampleValidation);
+        }
+
         return "_Full";
     }
 }

@@ -19,9 +19,16 @@ For each strategy in the databank, the snippet:
 3. **Performs Circular Shifts**: Generates $N$ randomized runs. For each run (monkey), all trades are shifted forward in time by a random offset, wrapping around the history boundary.
 4. **Simulates Path Evaluation**:
    * **Entries**: Opened at the shifted bar's Open price.
-   * **Exits**: Evaluated bar-by-bar to check if the Stop Loss (SL) or Profit Target (PT) is hit first. If the trade originally had no SL/TP, it uses the number of bars as a hard exit limit.
+   * **Exits and Replication Modes (`replicationMode`)**:
+     * **`SLTP` (SL/TP Levels)**: Evaluated bar-by-bar to check if the Stop Loss (SL) or Profit Target (PT) is hit first based on original distances. If the original trade had no SL/TP, it uses the trade's bar count as a hard exit limit.
+     * **`AvgBars` (Fixed Average Exposure - Recommended)**: Computes the exact fractional average holding bars of the strategy. When 1-minute precision (`Precision=M1`) is not used, it applies a **Per-Monkey Deterministic Dithering** algorithm that distributes fractional bars across each monkey's trade sequence so that **every single simulated monkey run is guaranteed to have the exact same average holding duration per trade in hours** as the original strategy.
+     * **`IndivBars` (Individual Exposure)**: Applies to each monkey trade the exact duration in bars of its corresponding original trade.
+     * **Usage Recommendation**: It is recommended to use the `AvgBars` replication mode over `IndivBars`, as it incorporates a more exact, rigorous, and proven calculation methodology (featuring unbiased per-monkey deterministic duration dithering when 1-minute data is not used), guaranteeing that the strategy's average time exposure is identically replicated in every single simulation.
    * **Friday Exit**: Automatically closes trades at the Friday exit threshold if defined.
-   * **Risk Equalization**: Adjusts the simulated position size (lots) proportionally if the entry price differs from the original entry price, keeping the monetary risk of the Stop Loss identical.
+   * **Position Sizing and Money Management**:
+     * **Fixed Size (Fixed Lot)**: The snippet automatically detects if the strategy operates with a flat lot size (via inspection of project XML configuration settings `rg.getLastSettings()` and empirical trade order analysis). In this case, the monkey maintains **strictly the same fixed lot size** (`priceCorrection = 1.0`) across all simulated trades.
+     * **Fixed Amount / Variable Lot Size**: If the strategy uses variable lot sizes (fixed dollar risk management, etc.), the monkey applies **percentage return correction** (`priceCorrection = o.OpenPrice / entryPrice`). This adapts the simulated position size at the shifted entry price to maintain constant profit/loss per 1% asset price movement compared to the original trade.
+     * **Scope & Certification Disclaimer**: This Monkey Test was expressly designed to function correctly with **Fixed Size** (Fixed Lot) and **Fixed Amount** (Fixed Dollar Risk) Money Management methods. It has not been tested or certified with other Money Management modes (such as Risk %, Martingale, etc.), so while it may technically execute, its results are not certified for those modes.
 5. **Statistical Percentile Evaluation**: Compares the net profit of the original strategy against the distribution of the $N$ monkeys. If the original profit is greater than the defined percentile threshold of the monkeys' profits, the strategy passes.
 
 ---
@@ -51,8 +58,12 @@ Since the snippet uses the `Per Strategy Analysis` signature, you can also selec
 | **shiftingMode**   | `Random` | Circular time shifting mode: `Constant` (Constant Global Shift) or `Random` (Per-Trade Random Shift). | `Constant` |
 | **ResultsPluginCache** | *(absent)* | Optional keyword, not positional — it is detected as a case-insensitive substring anywhere in the Input Args string, so it can be appended after any of the 5 parameters above. When present, the snippet writes the cache artifacts (CSV + meta.json) described in [section 4](#4-expected-outputs). When absent (default), **no cache files are written**, regardless of the test outcome. | `500,95,OOS2,IndivBars,Random,ResultsPluginCache` |
 | **AutoDiscard** | *(absent)* | Optional keyword, same detection rules as `ResultsPluginCache` (case-insensitive substring, can be combined with it). Controls whether `filterStrategy` is allowed to signal SQX's engine to exclude the strategy when the test fails — see [section 4](#4-expected-outputs) for the full explanation. **Absent by default: strategies are never excluded**, regardless of PASSED/FAILED. | `500,95,OOS2,IndivBars,Random,AutoDiscard` |
+| **Precision=M1** / **M1** | *(absent: Main)* | Optional keyword (non-positional or positional parameter). Enables trade path simulation using 1-minute historical candle data (`SYMBOL_M1.dat` or `SYMBOL_1M.dat`). Monkey trade entries remain aligned with the strategy's original timeframe (e.g. H4), but trade duration, Stop Loss, Take Profit, and Friday exits are evaluated at 1-minute resolution. If 1-minute data is not available in `user/data/History/`, the test logs a warning and automatically falls back to the main timeframe (`H4`). | `500,95,FULL,IndivBars,Random,Precision=M1` |
+| **SegmentDuration=N** | *(absent: off)* | Optional keyword (e.g. `SegmentDuration=300` or `SegmentDuration=200`). Enables a test variant that divides the target period into continuous sub-segments of homogeneous duration targeting $N$ days. Runs additionally and independently alongside the primary test, publishing results under specific keys (`MonkeyTestResult_Seg_IS_1`, `MonkeyTestResult_Seg_FULL_1`, etc.) and count/duration metadata. Accepts any numeric value requested by the user. | `500,95,FULL,IndivBars,Random,SegmentDuration=300` |
 
-*Example Input Args:* `500,95,OOS2,IndivBars,Random` (Runs 500 monkeys on OOS2 trades, using individual bar exposure exits and per-trade random shifting; no cache files written). Omitting replicationMode and shiftingMode automatically defaults to `IndivBars` and `Random`. Add `ResultsPluginCache` anywhere in the string, e.g. `500,95,OOS2,IndivBars,Random,ResultsPluginCache`, to also write the cache files for the ResultsPlugin.
+> **Note on Data Precision:** The precision setting chosen in StrategyQuant X's general backtest settings (e.g. backtest engine tab in Builder/Retester) **does not affect** the data source read by this Custom Analysis snippet. By default, the Monkey Test always reads the strategy's main timeframe candle file (e.g. `H4.dat`). To force the Monkey Test to load and simulate on 1-minute historical candle data (`SYMBOL_M1.dat`), the keyword `Precision=M1` or `M1` **must be explicitly included** in the Custom Analysis task's **Input Args** string.
+
+*Example Input Args:* `500,95,OOS2,IndivBars,Random` (Runs 500 monkeys on OOS2 trades, using individual bar exposure exits and per-trade random shifting; no cache files written). Omitting replicationMode and shiftingMode automatically defaults to `IndivBars` and `Random`. Add `ResultsPluginCache` anywhere in the string, e.g. `500,95,OOS2,IndivBars,Random,ResultsPluginCache`, to also write the cache files for the ResultsPlugin. To execute the test with 1-minute intrabar precision, append `Precision=M1` or `M1` to Input Args (e.g. `500,95,FULL,IndivBars,Random,Precision=M1`). To enable time-segmented testing, append `SegmentDuration=300` (e.g. `500,95,FULL,IndivBars,Random,SegmentDuration=300`).
 
 
 ---
@@ -85,8 +96,14 @@ Results are stored **per period**, using one key per period suffix, so several r
 | `MonkeyTestResult<suffix>` | Outcome of that period (see status list below). |
 | `MonkeyTestPercentile<suffix>` | Rank percentile achieved against the monkey distribution, e.g. `85.20%`. |
 | `MonkeyTestZScore<suffix>` | Z-Score of the real profit vs. the monkey mean/stdev. |
+| `MonkeyTestResult_Seg_<PERIOD>_<J>` | Outcome of sub-segment $J$ of period (e.g. `MonkeyTestResult_Seg_IS_1`). Generated when `SegmentDuration` is active. |
+| `MonkeyTestPercentile_Seg_<PERIOD>_<J>` | Rank percentile achieved in sub-segment $J$ (e.g. `MonkeyTestPercentile_Seg_FULL_2`). |
+| `MonkeyTestZScore_Seg_<PERIOD>_<J>` | Z-Score achieved in sub-segment $J$ (e.g. `MonkeyTestZScore_Seg_OOS1_1`). |
+| `MonkeyTest_SegCount_<PERIOD>` | Metadata: Total number of sub-segments created for period (e.g. `MonkeyTest_SegCount_IS = 4`). |
+| `MonkeyTest_SegDays_<PERIOD>` | Metadata: Actual average duration in days of each sub-segment (e.g. `MonkeyTest_SegDays_IS = 274.0`). |
+| `MonkeyTest_SegTargetDays` | Metadata: Target duration in days requested in Input Args (e.g. `300`). |
 
-Valid suffixes: `_IS`, `_OOS`, `_ISV`, `_OOS1`..`_OOS10`, `_ISV1`..`_ISV10`, `_Full`.
+Valid suffixes: `_IS`, `_OOS`, `_ISV`, `_OOS1`..`_OOS10`, `_ISV1`..`_ISV10`, `_Full`, as well as segmented suffixes `_Seg_<LABEL>_<J>`.
 
 The two columns resolve the suffix automatically from the **sample type selector of the Databank** — exactly like the `Synth*` columns of `CVSintetica` — so selecting *OOS2* in that selector shows the `_OOS2` values. Resolution is **strict**: if a period has not been evaluated, the column shows `N/A` instead of falling back to another period's value. The legacy unsuffixed keys (written by earlier versions) are still accepted, but only under *Full Sample*.
 

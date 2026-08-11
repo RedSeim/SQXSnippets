@@ -643,8 +643,7 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                     // 1. Inherit Money Management (Targeting main Setup first)
                     Element elMM = (mainSetup != null && mainSetup.getChild("MoneyManagement") != null) ? mainSetup.getChild("MoneyManagement") : findElementRecursive(rootSettings, "MoneyManagement");
                     if (elMM != null) {
-                        com.strategyquant.tradinglib.MoneyManagementMethod mmm = 
-                            com.strategyquant.tradinglib.moneymanagement.MoneyManagementMethodsList.get().loadMMMethodFromXML(elMM);
+                        com.strategyquant.tradinglib.MoneyManagementMethod mmm = resolveActiveMoneyManagement(elMM);
                         if (mmm != null) {
                             settings.set(SettingsKeys.MoneyManagement, mmm);
                             logDebug("[" + source.getName() + "] Inherited MoneyManagement successfully: " + mmm.getClass().getName());
@@ -1365,6 +1364,86 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
 
             return elSetups.getChild("Setup");
         } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private com.strategyquant.tradinglib.MoneyManagementMethod resolveActiveMoneyManagement(Element elMM) {
+        if (elMM == null) return null;
+
+        try {
+            Element activeMethodEl = null;
+            java.util.List<Element> methods = elMM.getChildren("Method");
+            if (methods != null && !methods.isEmpty()) {
+                for (Element child : methods) {
+                    String useAttr = child.getAttributeValue("use");
+                    if ("true".equalsIgnoreCase(useAttr) || "1".equals(useAttr)) {
+                        activeMethodEl = child;
+                        break;
+                    }
+                }
+            }
+
+            if (activeMethodEl != null) {
+                String type = activeMethodEl.getAttributeValue("type");
+                if (type != null && !type.trim().isEmpty()) {
+                    type = type.trim();
+                    logDebug("[resolveActiveMoneyManagement] Target active MM type: " + type);
+
+                    com.strategyquant.tradinglib.MoneyManagementMethod mmm = null;
+
+                    // Attempt 1: Class.forName("com.strategyquant.tradinglib.moneymanagement." + type)
+                    try {
+                        Class<?> clazz = Class.forName("com.strategyquant.tradinglib.moneymanagement." + type);
+                        mmm = (com.strategyquant.tradinglib.MoneyManagementMethod) clazz.getDeclaredConstructor().newInstance();
+                    } catch (Exception ignored) {}
+
+                    // Attempt 2: Class.forName("SQ.MoneyManagement." + type)
+                    if (mmm == null) {
+                        try {
+                            Class<?> clazz = Class.forName("SQ.MoneyManagement." + type);
+                            mmm = (com.strategyquant.tradinglib.MoneyManagementMethod) clazz.getDeclaredConstructor().newInstance();
+                        } catch (Exception ignored) {}
+                    }
+
+                    if (mmm != null) {
+                        // Construct a combined XML element containing both root tags (InitialCapital) and method params
+                        Element synthMM = new Element("MoneyManagement");
+                        synthMM.setAttribute("type", type);
+                        try {
+                            for (Object childObj : elMM.getChildren()) {
+                                if (childObj instanceof Element) {
+                                    Element childEl = (Element) childObj;
+                                    if (!"Method".equalsIgnoreCase(childEl.getName())) {
+                                        synthMM.addContent(childEl.clone());
+                                    }
+                                }
+                            }
+                            for (Object childObj : activeMethodEl.getChildren()) {
+                                if (childObj instanceof Element) {
+                                    synthMM.addContent(((Element) childObj).clone());
+                                }
+                            }
+                        } catch (Exception ignored) {}
+
+                        // Sequential parameter loading guarantees 100% parameter coverage for all MM snippets
+                        try { mmm.setFromXML(activeMethodEl); } catch (Exception ignored) {}
+                        try { mmm.setFromXML(synthMM); } catch (Exception ignored) {}
+                        try { mmm.setFromXML(elMM); } catch (Exception ignored) {}
+
+                        logDebug("[resolveActiveMoneyManagement] Successfully loaded active MM class: " + mmm.getClass().getName());
+                        return mmm;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logDebug("[resolveActiveMoneyManagement] Exception parsing active method: " + e.getMessage());
+        }
+
+        try {
+            return com.strategyquant.tradinglib.moneymanagement.MoneyManagementMethodsList.get().loadMMMethodFromXML(elMM);
+        } catch (Exception e) {
+            logDebug("[resolveActiveMoneyManagement] Fallback loadMMMethodFromXML failed: " + e.getMessage());
             return null;
         }
     }

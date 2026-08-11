@@ -1,1 +1,2 @@
-SQ/CustomAnalysis/CVSintetica_debug.log
+*.log
+SQ/CustomAnalysis/*.log

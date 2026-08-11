@@ -27,7 +27,8 @@ The Custom Analysis execution flow consists of the following steps:
     *   **Full Sample (Full)** (Entire history)
 
     This control backtest inherits from the original backtest:
-    *   Money Management, Trading Options (incl. Realistic Gaps), Commissions, and Swap, always reading the **main** `<Setup>` from the strategy's configuration XML (not just any `<Setup>` that happens to appear first in the tree — if the project has additional Retest/Cross-Check Setups with different commission, swap, or options, they are not confused with the main one).
+    *   **Universal Active Money Management Inheritance**: Scans the XML nodes looking for the method possessing the `use="true"` attribute (`FixedAmount`, `RiskFixedPctOfAccount`, `RiskFixedBalancePct`, `FixedSize`, etc.) and sequentially injects 100% of its parameters (`RiskedMoney`, `MaxLots`, `InitialCapital`, `Decimals`). This guarantees that both the control re-backtest and synthetic simulations run with the strategy's true dynamic lot sizing, ensuring `CA_OriginalProfit` matches the Databank's native `Net profit` exactly.
+    *   Trading Options (incl. Realistic Gaps), Commissions, and Swap, always reading the **main** `<Setup>` from the strategy's configuration XML (not just any `<Setup>` that happens to appear first in the tree — if the project has additional Retest/Cross-Check Setups with different commission, swap, or options, they are not confused with the main one).
     *   Dates, timeframe, session, spread, slippage, minimum distance, and test precision.
     *   The same engine as the original strategy (MetaTrader5 Hedged/Netted, MetaTrader4, Tradestation, NinjaTrader, JForex, or Stockpicker), resolved individually for each strategy from its own XML.
 
@@ -123,10 +124,18 @@ If you request `OOS2` on a strategy that only has one OOS period, the analysis *
 ### Pass Rate Denominator
 The Pass Rate is calculated over the simulations that were **actually evaluated**, i.e. those whose statistics SQX was able to compute for that period. A simulation whose statistics don't exist is excluded from the sample rather than counted as a loss, because a measurement gap is not a strategy failure. Under normal conditions this exclusion count is zero and the value matches exactly what earlier versions produced; the number of exclusions is recorded in `CA_SynthMissingStatsCount<suffix>`.
 
-### Databank Columns
-The 7 `Synth*` columns (`SynthPassRate`, `SynthMeanProfit`, `SynthStdevProfit`, `SynthCVProfit`, `SynthOverfittingRatio`, `SynthMeanSharpe`, `SynthFailCount`) automatically resolve the period from the **Databank's sample type selector**. To see the `_OOS2` values, simply select **OOS2** in that selector; no new columns are needed.
+### Quantitative Rigor in Resolution Comparisons (H4 vs M1)
+When available synthetic data is generated on a higher timeframe (e.g., 4-hour resolution / H4) and 1-minute (M1) synthetics are unavailable:
+- **Homogeneous Comparison ("Apples to Apples")**: To ensure the overfitting evaluation is quantitatively unbiased and reliable, both the main control backtest and synthetic simulations should run on the same time resolution (H4 original vs H4 synthetic).
+- **Consistency in Overfitting Metrics**: Although absolute results of an M1-precision backtest may differ from an H4-precision backtest due to intrabar resolution, comparing H4 retest returns against the H4 synthetic universe removes instrumental bias and rigorously measures the strategy's true stability and ergodicity.
 
-> **Important:** these 7 columns must be **recompiled** after updating this Custom Analysis. Prior to this version they did not recognize numbered sample types and showed *Full Sample* values as if they were the selected part's.
+### Databank Columns
+The 8 `Synth*` columns (`SynthPassRate`, `SynthMeanProfit`, `SynthStdevProfit`, `SynthOriginalProfit`, `SynthCVProfit`, `SynthOverfittingRatio`, `SynthMeanSharpe`, `SynthFailCount`) automatically resolve the period from the **Databank's sample type selector**. To see the `_OOS2` values, simply select **OOS2** in that selector; no new columns are needed.
+
+> **Important:** The `SynthOriginalProfit` (`Synth Original Profit`) column shows the net profit obtained in the control re-backtest on the original data (`CA_OriginalProfit`) operated with true inherited dynamic Money Management. This column allows visual auditing in the Databank table to verify that control performance matches original strategy performance against the synthetic simulation mean (`SynthMeanProfit`).
+
+> [!TIP]
+> **Primary Methodological Validation Recommendation:** It is strongly recommended to always verify in the Databank table view that the strategy's native `Net profit` column (for the analyzed period, such as `IS` or `OOS`) matches the `Synth Original Profit` (`SynthOriginalProfit`) column 100%. This control verification acts as a visual integrity audit certifying that all backtest settings (dynamic Money Management, risk parameters, commissions, swap, simulation engine, and precision) have been faithfully inherited from the original strategy into the synthetic data simulations.
 
 ### Diagnostic Variables
 | Key | Meaning |

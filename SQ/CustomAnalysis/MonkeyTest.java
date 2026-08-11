@@ -108,6 +108,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
         // distintos no evita que las estrategias fallidas se excluyan de la copia. AutoDiscard
         // es la única forma de pedir explícitamente el descarte real en ambos escenarios.
         boolean autoDiscard = false;
+        boolean useM1Precision = false;
+        double segmentDurationDays = 0.0;
 
         try {
             String inputArgs = this.getInputArgs();
@@ -150,6 +152,43 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 if (inputArgs.toUpperCase().contains("AUTODISCARD")) {
                     autoDiscard = true;
                 }
+                String upperArgs = inputArgs.toUpperCase();
+                if (upperArgs.contains("PRECISION=M1") || upperArgs.contains("PRECISION_M1") || upperArgs.contains("PRECISION=1M") || upperArgs.contains("PRECISION_1M") || upperArgs.contains(",M1") || upperArgs.contains("M1,")) {
+                    useM1Precision = true;
+                } else {
+                    for (String a : upperArgs.split(",")) {
+                        String trimmed = a.trim();
+                        if (trimmed.equals("M1") || trimmed.equals("1M") || trimmed.equals("PRECISION=M1") || trimmed.equals("PRECISION=1M")) {
+                            useM1Precision = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (upperArgs.contains("SEGMENTDURATION")) {
+                    for (String a : inputArgs.split(",")) {
+                        String trimmed = a.trim();
+                        String upperTrimmed = trimmed.toUpperCase();
+                        if (upperTrimmed.contains("SEGMENTDURATION")) {
+                            String valStr = "";
+                            if (trimmed.indexOf("=") >= 0) {
+                                valStr = trimmed.substring(trimmed.indexOf("=") + 1).trim();
+                            } else if (trimmed.indexOf(":") >= 0) {
+                                valStr = trimmed.substring(trimmed.indexOf(":") + 1).trim();
+                            } else {
+                                valStr = trimmed.replaceAll("(?i)SEGMENTDURATION", "").trim();
+                            }
+                            try {
+                                segmentDurationDays = Double.parseDouble(valStr);
+                                if (segmentDurationDays > 0) {
+                                    Log.info("MonkeyTest: SegmentDuration requested = " + segmentDurationDays + " days.");
+                                }
+                            } catch (Exception eVal) {
+                                Log.warn("MonkeyTest: Could not parse SegmentDuration value from '" + a + "': " + eVal.getMessage());
+                            }
+                        }
+                    }
+                }
             }
         } catch (Exception e) {
             Log.warn("Could not read input args, using defaults (500 monkeys, 95%, FULL, IndivBars, Random). Reason: " + e.getMessage());
@@ -179,8 +218,19 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 throw new Exception("Could not parse symbol and timeframe from main result key: " + mainResultKey);
             }
 
-            // Las velas son las mismas para todos los periodos: se cargan una única vez.
+            // Las velas del timeframe principal de la estrategia se cargan una única vez.
             ArrayList<Candle> candles = loadCandles(symbolConnection, timeframe, mainResult);
+            ArrayList<Candle> precisionCandles = candles;
+
+            if (useM1Precision) {
+                ArrayList<Candle> m1Candles = loadCandles(symbolConnection, "M1", mainResult);
+                if (m1Candles != null && !m1Candles.isEmpty()) {
+                    precisionCandles = m1Candles;
+                    Log.info("MonkeyTest: loaded " + m1Candles.size() + " M1 candles for 1-minute precision simulation on " + symbolConnection);
+                } else {
+                    Log.warn("MonkeyTest: requested Precision=M1 but M1 data file (SYMBOL_M1.dat / SYMBOL_1M.dat) was not found for " + symbolConnection + ". Falling back to main timeframe candles (" + timeframe + ").");
+                }
+            }
 
             periods = buildPeriodTable(rg, mainResultKey, requested);
 
@@ -194,11 +244,15 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     Log.warn("No BDF candles loaded for strategy: " + rg.getName() + " on " + symbolConnection + " " + timeframe);
                 } else {
                     OrdersList orders = resolveOrders(rg, mainResultKey, pd);
-                    res = runMonkeyTestForPeriod(rg, pd, orders, candles, numMonkeys, percentile, replicationMode, shiftingMode, rng);
+                    res = runMonkeyTestForPeriod(rg, pd, orders, candles, precisionCandles, numMonkeys, percentile, replicationMode, shiftingMode, rng);
                 }
 
                 publishPeriodResult(rg, pd, res);
                 resultsBySuffix.put(pd.suffix, res);
+            }
+
+            if (segmentDurationDays > 0) {
+                runSegmentedSubTests(rg, mainResultKey, periods, candles, precisionCandles, numMonkeys, percentile, replicationMode, shiftingMode, segmentDurationDays, rng);
             }
         } catch (Exception e) {
             Log.error("Error computing Monkey Test for strategy " + rg.getName(), e);
@@ -437,6 +491,21 @@ public class MonkeyTest extends CustomAnalysisMethod {
         }
     }
 
+    private void clearSegmentedPeriodKeys(ResultsGroup rg, String label) {
+        try {
+            int prevCount = rg.specialValues().getInt("MonkeyTest_SegCount_" + label, 0);
+            int maxClear = Math.max(prevCount, 50);
+            for (int j = 1; j <= maxClear; j++) {
+                String suffix = "_Seg_" + label + "_" + j;
+                for (String base : PERIOD_KEYS) {
+                    rg.specialValues().set(base + suffix, null);
+                }
+            }
+            rg.specialValues().set("MonkeyTest_SegCount_" + label, null);
+            rg.specialValues().set("MonkeyTest_SegDays_" + label, null);
+        } catch (Exception ignored) {}
+    }
+
     private void publishPeriodResult(ResultsGroup rg, PeriodDef pd, PeriodResult res) {
         writeKeys(rg, pd.suffix, res);
         if (pd.alsoPublishAs != null) {
@@ -452,12 +521,108 @@ public class MonkeyTest extends CustomAnalysisMethod {
             res.zScoreText != null ? res.zScoreText : "N/A");
     }
 
+    private void runSegmentedSubTests(ResultsGroup rg, String mainResultKey, ArrayList<PeriodDef> periods,
+                                     ArrayList<Candle> candles, ArrayList<Candle> precisionCandles,
+                                     int numMonkeys, double percentile, String replicationMode,
+                                     String shiftingMode, double segmentDurationDays, Random rng) {
+        if (segmentDurationDays <= 0 || candles == null || candles.isEmpty()) {
+            return;
+        }
+
+        try {
+            rg.specialValues().set("MonkeyTest_SegTargetDays", segmentDurationDays);
+
+            for (PeriodDef pd : periods) {
+                String label = pd.label();
+                clearSegmentedPeriodKeys(rg, label);
+
+                OrdersList orders = resolveOrders(rg, mainResultKey, pd);
+                if (orders == null || orders.size() == 0) {
+                    continue;
+                }
+
+                // Filter valid trades to find overall tMin and tMax
+                long tMin = Long.MAX_VALUE;
+                long tMax = Long.MIN_VALUE;
+                int validTradeCount = 0;
+                for (int i = 0; i < orders.size(); i++) {
+                    Order o = orders.get(i);
+                    if (!o.isBalanceOrder() && !(o.OpenPrice == o.ClosePrice && Math.abs(o.PL) < 1e-9)) {
+                        validTradeCount++;
+                        if (o.OpenTime < tMin) tMin = o.OpenTime;
+                        if (o.CloseTime > tMax) tMax = o.CloseTime;
+                    }
+                }
+
+                if (validTradeCount == 0 || tMin >= tMax) {
+                    continue;
+                }
+
+                double totalDays = (double) (tMax - tMin) / (1000.0 * 60.0 * 60.0 * 24.0);
+                if (totalDays <= 0) {
+                    continue;
+                }
+
+                int k = (int) Math.round(totalDays / segmentDurationDays);
+                k = Math.max(1, Math.min(50, k));
+                double actualSegDays = totalDays / k;
+
+                rg.specialValues().set("MonkeyTest_SegCount_" + label, k);
+                rg.specialValues().set("MonkeyTest_SegDays_" + label, Math.round(actualSegDays * 10.0) / 10.0);
+
+                long segmentMs = (long) Math.ceil((double) (tMax - tMin) / (double) k);
+
+                for (int j = 1; j <= k; j++) {
+                    long segStart = tMin + (long) (j - 1) * segmentMs;
+                    long segEnd = (j == k) ? tMax : (tMin + (long) j * segmentMs);
+
+                    // Filter subOrders
+                    OrdersList subOrders = new OrdersList("SubOrders");
+                    for (int i = 0; i < orders.size(); i++) {
+                        Order o = orders.get(i);
+                        if (o.OpenTime >= segStart && o.OpenTime <= segEnd) {
+                            subOrders.add(o);
+                        }
+                    }
+
+                    // Filter subCandles
+                    ArrayList<Candle> subCandles = new ArrayList<>();
+                    for (Candle c : candles) {
+                        if (c.time >= segStart && c.time <= segEnd) {
+                            subCandles.add(c);
+                        }
+                    }
+
+                    // Filter subPrecisionCandles
+                    ArrayList<Candle> subPrecisionCandles = subCandles;
+                    if (precisionCandles != candles && precisionCandles != null) {
+                        subPrecisionCandles = new ArrayList<>();
+                        for (Candle c : precisionCandles) {
+                            if (c.time >= segStart && c.time <= segEnd) {
+                                subPrecisionCandles.add(c);
+                            }
+                        }
+                    }
+
+                    PeriodResult subRes = runMonkeyTestForPeriod(rg, pd, subOrders, subCandles, subPrecisionCandles,
+                            numMonkeys, percentile, replicationMode, shiftingMode, rng);
+
+                    String segSuffix = "_Seg_" + label + "_" + j;
+                    writeKeys(rg, segSuffix, subRes);
+                }
+            }
+        } catch (Exception e) {
+            Log.error("Error executing segmented Monkey Test for " + rg.getName(), e);
+        }
+    }
+
     // =========================================================
     // Cálculo del test para un periodo
     // =========================================================
 
     private PeriodResult runMonkeyTestForPeriod(ResultsGroup rg, PeriodDef pd, OrdersList orders,
-                                                ArrayList<Candle> candles, int numMonkeys, double percentile,
+                                                ArrayList<Candle> candles, ArrayList<Candle> precisionCandles,
+                                                int numMonkeys, double percentile,
                                                 String replicationMode, String shiftingMode, Random rng) {
         PeriodResult res = new PeriodResult();
 
@@ -492,8 +657,13 @@ public class MonkeyTest extends CustomAnalysisMethod {
                 return res;
             }
 
+            boolean isFixedSize = checkIsFixedSize(rg, tradeOrders);
+
             int barsCount = candles.size();
             long tfMs = inferTimeframeMs(candles);
+
+            int precBarsCount = precisionCandles.size();
+            long precTfMs = inferTimeframeMs(precisionCandles);
 
             // Detect Friday exit
             boolean hasFriday = false;
@@ -558,6 +728,12 @@ public class MonkeyTest extends CustomAnalysisMethod {
             }
             double meanHoldingPeriod = tradeCount > 0 ? (totalHoldingBars / tradeCount) : 0.0;
 
+            double exactAvgBars = tradeCount > 0 ? (totalHoldingBars / tradeCount) : 4.0;
+            int baseBarsAvg = (int) Math.floor(exactAvgBars);
+            if (baseBarsAvg < 1) baseBarsAvg = 1;
+            double remainderAvg = exactAvgBars - baseBarsAvg;
+            int numExtraBarsAvg = (int) Math.round(tradeCount * remainderAvg);
+
             int actualCount = tradeCount;
             if ("Random".equals(shiftingMode)) {
                 actualCount = Math.min(tradeCount, (int) Math.floor((double) M / avgHoldingBars));
@@ -609,7 +785,13 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     Order o = tradeOrders.get(k);
                     int t_prime = entries[k];
 
-                    double entryPrice = candles.get(t_prime).open;
+                    long entryTime = candles.get(t_prime).time;
+                    int t_prime_prec = (precisionCandles == candles) ? t_prime : findBarIndex(precisionCandles, entryTime);
+                    if (t_prime_prec < 0 || t_prime_prec >= precBarsCount) {
+                        t_prime_prec = Math.max(0, Math.min(t_prime_prec, precBarsCount - 1));
+                    }
+
+                    double entryPrice = precisionCandles.get(t_prime_prec).open;
 
                     boolean hasSL = false;
                     double exitPrice = -1;
@@ -633,15 +815,15 @@ public class MonkeyTest extends CustomAnalysisMethod {
                             tpPrice = direction == 1 ? entryPrice * (1.0 + tp_pct) : entryPrice * (1.0 - tp_pct);
                         }
 
-                        int maxBars = holdingBars(o, tfMs);
+                        int maxBars = holdingBars(o, precTfMs);
                         boolean useBarLimit = !hasSL && !hasTP;
-                        int maxLoopBars = useBarLimit ? maxBars : (barsCount - t_prime);
+                        int maxLoopBars = useBarLimit ? maxBars : (precBarsCount - t_prime_prec);
                         if (maxLoopBars <= 0) maxLoopBars = 1;
 
-                        // Step-by-step path evaluation
+                        // Step-by-step path evaluation on precisionCandles
                         for (int b = 0; b < maxLoopBars; b++) {
-                            int candleIdx = (t_prime + b) % barsCount;
-                            Candle c = candles.get(candleIdx);
+                            int candleIdx = (t_prime_prec + b) % precBarsCount;
+                            Candle c = precisionCandles.get(candleIdx);
 
                             if (hasFriday && isAfterFridayExit(c.time, FridayExitHour, FridayExitMinute)) {
                                 exitPrice = c.open;
@@ -678,19 +860,29 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         }
 
                         if (exitPrice == -1) {
-                            int exitIdx = (t_prime + maxLoopBars - 1) % barsCount;
-                            exitPrice = candles.get(exitIdx).close;
-                            exitTime = candles.get(exitIdx).time;
+                            int exitIdx = (t_prime_prec + maxLoopBars - 1) % precBarsCount;
+                            exitPrice = precisionCandles.get(exitIdx).close;
+                            exitTime = precisionCandles.get(exitIdx).time;
                         }
                     } else {
                         // "AvgBars" or "IndivBars" replication modes
-                        int maxBars = "AvgBars".equals(replicationMode) ? avgHoldingBars : holdingBars(o, tfMs);
-                        int maxLoopBars = Math.min(maxBars, barsCount - t_prime);
+                        int maxBars;
+                        if ("AvgBars".equals(replicationMode)) {
+                            if (precisionCandles == candles) {
+                                maxBars = (k < numExtraBarsAvg) ? (baseBarsAvg + 1) : baseBarsAvg;
+                            } else {
+                                maxBars = (int) Math.round(exactAvgBars * tfMs / precTfMs);
+                            }
+                        } else {
+                            maxBars = holdingBars(o, precTfMs);
+                        }
+                        if (maxBars < 1) maxBars = 1;
+                        int maxLoopBars = Math.min(maxBars, precBarsCount - t_prime_prec);
                         if (maxLoopBars <= 0) maxLoopBars = 1;
 
                         for (int b = 0; b < maxLoopBars; b++) {
-                            int candleIdx = (t_prime + b) % barsCount;
-                            Candle c = candles.get(candleIdx);
+                            int candleIdx = (t_prime_prec + b) % precBarsCount;
+                            Candle c = precisionCandles.get(candleIdx);
 
                             if (hasFriday && isAfterFridayExit(c.time, FridayExitHour, FridayExitMinute)) {
                                 exitPrice = c.open;
@@ -700,9 +892,9 @@ public class MonkeyTest extends CustomAnalysisMethod {
                         }
 
                         if (exitPrice == -1) {
-                            int exitIdx = (t_prime + maxLoopBars - 1) % barsCount;
-                            exitPrice = candles.get(exitIdx).close;
-                            exitTime = candles.get(exitIdx).time;
+                            int exitIdx = (t_prime_prec + maxLoopBars - 1) % precBarsCount;
+                            exitPrice = precisionCandles.get(exitIdx).close;
+                            exitTime = precisionCandles.get(exitIdx).time;
                         }
                     }
 
@@ -711,7 +903,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
                     double grossOrigPL = o.PL - o.CommSwap;
                     double pipMult = Math.abs(origPriceDiff) > 1e-7 ? grossOrigPL / (o.Size * origPriceDiff) : 0.0;
 
-                    double priceCorrection = hasSL ? (o.OpenPrice / entryPrice) : 1.0;
+                    double priceCorrection = isFixedSize ? 1.0 : ((entryPrice > 1e-9) ? (o.OpenPrice / entryPrice) : 1.0);
                     double monkeySize = o.Size * priceCorrection;
                     if (monkeySize < 0.01) monkeySize = 0.01;
 
@@ -897,6 +1089,15 @@ public class MonkeyTest extends CustomAnalysisMethod {
             // Find dat file path
             String path = "user/data/History/" + symbolConnection + "/" + symbolConnection + "_" + timeframe + ".dat";
             java.io.File file = new java.io.File(path);
+            String altTimeframe = timeframe.equalsIgnoreCase("M1") ? "1M" : (timeframe.equalsIgnoreCase("1M") ? "M1" : null);
+
+            if (!file.exists() && altTimeframe != null) {
+                java.io.File altFile = new java.io.File("user/data/History/" + symbolConnection + "/" + symbolConnection + "_" + altTimeframe + ".dat");
+                if (altFile.exists()) {
+                    file = altFile;
+                }
+            }
+
             if (!file.exists()) {
                 // Try case-insensitive search or fallback
                 java.io.File historyDir = new java.io.File("user/data/History");
@@ -906,7 +1107,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
                             java.io.File[] datFiles = sub.listFiles();
                             if (datFiles != null) {
                                 for (java.io.File f : datFiles) {
-                                    if (f.getName().equalsIgnoreCase(symbolConnection + "_" + timeframe + ".dat")) {
+                                    if (f.getName().equalsIgnoreCase(symbolConnection + "_" + timeframe + ".dat") ||
+                                        (altTimeframe != null && f.getName().equalsIgnoreCase(symbolConnection + "_" + altTimeframe + ".dat"))) {
                                         file = f;
                                         break;
                                     }
@@ -1041,5 +1243,28 @@ public class MonkeyTest extends CustomAnalysisMethod {
             return true;
         }
         return false;
+    }
+
+    private boolean checkIsFixedSize(ResultsGroup rg, ArrayList<Order> tradeOrders) {
+        try {
+            String xml = rg != null ? rg.getLastSettings() : null;
+            if (xml != null && xml.contains("MoneyManagement")) {
+                String xmlUpper = xml.toUpperCase();
+                if (xmlUpper.contains("FIXEDSIZE") || xmlUpper.contains("FIXED_SIZE") || xmlUpper.contains("FIXEDLOTS")) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {}
+
+        if (tradeOrders != null && tradeOrders.size() > 1) {
+            double firstSize = tradeOrders.get(0).Size;
+            for (int i = 1; i < tradeOrders.size(); i++) {
+                if (Math.abs(tradeOrders.get(i).Size - firstSize) > 1e-5) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        return true;
     }
 }

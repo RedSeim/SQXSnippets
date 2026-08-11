@@ -130,7 +130,7 @@ Cuando los datos sintéticos disponibles están generados en un timeframe superi
 - **Consistencia en la Métrica de Overfitting**: Aunque los resultados absolutos de un backtest a precisión M1 puedan diferir de un backtest a precisión H4 debido a la resolución intrabarra, comparar los retornos del retest en H4 frente al universo sintético en H4 elimina cualquier sesgo instrumental y permite medir con total rigor la estabilidad y ergodicidad real de la estrategia.
 
 ### Columnas del Databank
-Las 8 columnas `Synth*` (`SynthPassRate`, `SynthMeanProfit`, `SynthStdevProfit`, `SynthOriginalProfit`, `SynthCVProfit`, `SynthOverfittingRatio`, `SynthMeanSharpe`, `SynthFailCount`) resuelven automáticamente el periodo a partir del **selector de sample type del Databank**. Para ver los valores de `_OOS2` basta con seleccionar **OOS2** en ese selector; no hacen falta columnas nuevas.
+Las 10 columnas `Synth*` / `Monkey*` (`SynthPassRate`, `SynthPassRateAgainstMonkeys`, `MonkeyMedianProfit`, `SynthMeanProfit`, `SynthStdevProfit`, `SynthOriginalProfit`, `SynthCVProfit`, `SynthOverfittingRatio`, `SynthMeanSharpe`, `SynthFailCount`) resuelven automáticamente el periodo a partir del **selector de sample type del Databank**. Para ver los valores de `_OOS2` basta con seleccionar **OOS2** en ese selector; no hacen falta columnas nuevas por cada subperiodo.
 
 > **Importante:** La columna `SynthOriginalProfit` (`Synth Original Profit`) muestra el beneficio neto del re-backtest de control sobre la data original (`CA_OriginalProfit`) operado con el Money Management dinámico heredado real. Esta columna permite auditar y verificar visualmente en la tabla del Databank que el rendimiento de control coincida con el rendimiento original de la estrategia frente a la media de las simulaciones sintéticas (`SynthMeanProfit`).
 
@@ -146,8 +146,10 @@ Las 8 columnas `Synth*` (`SynthPassRate`, `SynthMeanProfit`, `SynthStdevProfit`,
 | `CA_SynthSeparateMetricsSuspect` | `1` si faltaron estadísticas, lo que sugiere `ComputeSeparateMetrics` desactivado. |
 | `CA_SynthPartMissing<sufijo>` | `1` si se pidió una parte OOS que la estrategia no tiene. |
 | `CA_SynthMissingStatsCount<sufijo>` | Simulaciones excluidas por no tener estadísticas computables. |
-| `CA_SynthOriginalStatsMissing<sufijo>` | `1` si el backtest de control no tuvo estadísticas fiables para ese periodo (bien porque el run de control falló por completo, bien porque ese periodo concreto no tuvo estadísticas computables). El Overfitting Ratio de ese sufijo no se publica. |
-| `CA_SynthNoData<sufijo>` | `1` si **ninguna** de las simulaciones sintéticas de ese periodo produjo estadísticas computables (p. ej. el prefijo/nombre de la data sintética no existe). `CA_SynthMeanProfit`, `CA_SynthStdevProfit`, `CA_SyntheticRatio`, `CA_SynthMeanSharpe`, `CA_PassRate` y `CA_OverfittingRatio` de ese sufijo no se publican. |
+| `CA_SynthOriginalStatsMissing<sufijo>` | `1` si el backtest de control no tuvo estadísticas fiables para ese periodo. El Overfitting Ratio de ese sufijo no se publica. |
+| `CA_SynthNoData<sufijo>` | `1` si **ninguna** de las simulaciones sintéticas de ese periodo produjo estadísticas computables. |
+| `CA_PassRateAgainstMonkeys<sufijo>` | `%` de simulaciones sintéticas con `Net Profit > MonkeyTestMedianProfit`. Si la estrategia no tiene datos de Monkey Test, no se publica (columna muestra `N/A`). |
+| `MonkeyTestMedianProfit<sufijo>` | Mediana de Net Profit obtenida en la simulación del Monkey Test para ese periodo. |
 
 ### Limitación conocida
 Hay dos escenarios distintos en los que una parte de las métricas no se publica, cada uno con su propia señal de diagnóstico:

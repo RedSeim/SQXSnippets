@@ -70,19 +70,19 @@ Since the snippet uses the `Per Strategy Analysis` signature, you can also selec
 
 ## 4. Expected Outputs
 
-### Required: Install the Monkey Test Databank Column
+### Required: Install the Monkey Test Databank Columns
 
 The **MonkeyTest** Custom Analysis snippet only writes results into the strategy metadata. To **display** these results as columns in the SQX databank, you must also install and activate the companion **Databank Column** snippets:
 
-- **Files**: `SQ/Columns/Databanks/MonkeyTestColumn.java` and `SQ/Columns/Databanks/MonkeyTestZScoreColumn.java` (located alongside this snippet under `user/extend/Snippets/`)
-- **Column names in SQX**: `Monkey Test` (type: Text) and `Monkey Z-Score` (type: Decimal2)
+- **Files**: `SQ/Columns/Databanks/MonkeyTestColumn.java`, `SQ/Columns/Databanks/MonkeyTestZScoreColumn.java`, and `SQ/Columns/Databanks/MonkeyMedianProfit.java` (located alongside this snippet under `user/extend/Snippets/`)
+- **Column names in SQX**: `Monkey Test` (type: Text), `Monkey Z-Score` (type: Decimal2), and `MonkeyMedianProfit` (type: Decimal2)
 
 **Installation steps:**
-1. Ensure both column files are present in `user/extend/Snippets/SQ/Columns/Databanks/`.
+1. Ensure all column files are present in `user/extend/Snippets/SQ/Columns/Databanks/`.
 2. Restart SQX (or trigger snippet recompilation) so the columns are registered.
-3. In the Databank view, open the column selector and add the **"Monkey Test"** / **"Monkey Z-Score"** columns.
+3. In the Databank view, open the column selector and add the **"Monkey Test"** / **"Monkey Z-Score"** / **"MonkeyMedianProfit"** columns.
 
-> **Important:** both columns must be **recompiled** after updating this Custom Analysis. Earlier versions ignored the Databank sample-type selector and showed the same stored value in every period column.
+> **Important:** all columns must be **recompiled** after updating this Custom Analysis. Earlier versions ignored the Databank sample-type selector and showed the same stored value in every period column.
 
 > Without the Databank Columns installed, the test still runs and filters strategies via the `FiltersResult` column, but the individual outcomes (`PASSED`, `FAILED`, `LOW TRADES`, etc.) will not be visible in the databank grid.
 
@@ -96,6 +96,7 @@ Results are stored **per period**, using one key per period suffix, so several r
 | `MonkeyTestResult<suffix>` | Outcome of that period (see status list below). |
 | `MonkeyTestPercentile<suffix>` | Rank percentile achieved against the monkey distribution, e.g. `85.20%`. |
 | `MonkeyTestZScore<suffix>` | Z-Score of the real profit vs. the monkey mean/stdev. |
+| `MonkeyTestMedianProfit<suffix>` | Median Net Profit obtained by the monkeys in the simulation for that period. |
 | `MonkeyTestResult_Seg_<PERIOD>_<J>` | Outcome of sub-segment $J$ of period (e.g. `MonkeyTestResult_Seg_IS_1`). Generated when `SegmentDuration` is active. |
 | `MonkeyTestPercentile_Seg_<PERIOD>_<J>` | Rank percentile achieved in sub-segment $J$ (e.g. `MonkeyTestPercentile_Seg_FULL_2`). |
 | `MonkeyTestZScore_Seg_<PERIOD>_<J>` | Z-Score achieved in sub-segment $J$ (e.g. `MonkeyTestZScore_Seg_OOS1_1`). |

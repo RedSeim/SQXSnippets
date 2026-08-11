@@ -253,6 +253,22 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
         int[] periodExceptionCounts = new int[nP];
         int[] periodMissingStatsCounts = new int[nP];
 
+        Double[] periodMonkeyMedians = new Double[nP];
+        int[] periodSuccessCountsMonkeys = new int[nP];
+        int[] periodFailCountsMonkeys = new int[nP];
+
+        for (int p = 0; p < nP; p++) {
+            PeriodDef pd = periods.get(p);
+            if (pd.exists) {
+                periodMonkeyMedians[p] = getMonkeyMedianProfit(rg, pd.suffix);
+                if (periodMonkeyMedians[p] != null) {
+                    logDebug("[" + rg.getName() + "] Period " + pd.suffix + ": MonkeyTestMedianProfit = " + periodMonkeyMedians[p]);
+                } else {
+                    logDebug("[" + rg.getName() + "] Period " + pd.suffix + ": MonkeyTestMedianProfit NOT AVAILABLE (PassRateAgainstMonkeys will be N/A)");
+                }
+            }
+        }
+
         int synthSameBarErrorCount = 0;
         int synthChartEngineApplyFailedCount = 0;
 
@@ -339,6 +355,16 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                                 periodSuccessCounts[p]++;
                             }
 
+                            // Consideramos ganadora contra monos si el net profit es estrictamente mayor que la mediana del Monkey Test y operó en el periodo
+                            if (periodMonkeyMedians[p] != null) {
+                                double mMed = periodMonkeyMedians[p];
+                                if (s.profit <= mMed || s.trades == 0) {
+                                    periodFailCountsMonkeys[p]++;
+                                } else {
+                                    periodSuccessCountsMonkeys[p]++;
+                                }
+                            }
+
                             if (res.index <= 5) {
                                 logDebug("[" + rg.getName() + "] Synth #" + res.index + " (" + res.symbol + ") period " + pd.suffix + ": Profit=" + s.profit + ", Trades=" + s.trades + ", Sharpe=" + s.sharpe);
                             }
@@ -351,6 +377,9 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                             for (int p = 0; p < nP; p++) {
                                 if (!periods.get(p).exists) continue;
                                 periodFailCounts[p]++;
+                                if (periodMonkeyMedians[p] != null) {
+                                    periodFailCountsMonkeys[p]++;
+                                }
                                 periodBadStrategyCounts[p]++;
                             }
 
@@ -362,6 +391,9 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                             for (int p = 0; p < nP; p++) {
                                 if (!periods.get(p).exists) continue;
                                 periodFailCounts[p]++;
+                                if (periodMonkeyMedians[p] != null) {
+                                    periodFailCountsMonkeys[p]++;
+                                }
                                 periodExceptionCounts[p]++;
                             }
                         }
@@ -429,6 +461,9 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
             int evaluated = syntheticCount - periodMissingStatsCounts[p];
             double passRate = (evaluated > 0) ? ((double) periodSuccessCounts[p] / evaluated) : 0.0;
 
+            Double mMed = periodMonkeyMedians[p];
+            Double passRateAgainstMonkeys = (mMed != null && evaluated > 0) ? ((double) periodSuccessCountsMonkeys[p] / evaluated) : null;
+
             // 4. Sharpe medio de las simulaciones individuales
             double meanSharpe = mean(periodSharpes.get(p));
 
@@ -449,6 +484,11 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                 rg.specialValues().set("CA_SyntheticRatio" + suffix, syntheticRatio);
                 rg.specialValues().set("CA_SynthMeanSharpe" + suffix, meanSharpe);
                 rg.specialValues().set("CA_PassRate" + suffix, passRate);
+                if (passRateAgainstMonkeys != null) {
+                    rg.specialValues().set("CA_PassRateAgainstMonkeys" + suffix, passRateAgainstMonkeys);
+                    rg.specialValues().set("CA_SynthSuccessCountAgainstMonkeys" + suffix, periodSuccessCountsMonkeys[p]);
+                    rg.specialValues().set("CA_SynthFailCountAgainstMonkeys" + suffix, periodFailCountsMonkeys[p]);
+                }
             }
             if (overfittingReliable) {
                 rg.specialValues().set("CA_OverfittingRatio" + suffix, overfittingRatio);
@@ -482,6 +522,11 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
                 rg.specialValues().set("CA_SynthMeanProfit", meanFull);
                 rg.specialValues().set("CA_SynthStdevProfit", stdevFull);
                 rg.specialValues().set("CA_SynthMeanSharpe", meanFullSharpe);
+                if (periodMonkeyMedians[fullIdx] != null) {
+                    int evaluatedFull = syntheticCount - periodMissingStatsCounts[fullIdx];
+                    double passRateAgainstMonkeysFull = (evaluatedFull > 0) ? ((double) periodSuccessCountsMonkeys[fullIdx] / evaluatedFull) : 0.0;
+                    rg.specialValues().set("CA_PassRateAgainstMonkeys", passRateAgainstMonkeysFull);
+                }
             } else {
                 rg.specialValues().set("CA_SynthNoData", 1);
             }
@@ -1558,8 +1603,9 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
     private static final String[] PERIOD_SYNTH_KEYS = {
         "CA_SynthPartMissing", "CA_SynthOriginalStatsMissing", "CA_SynthNoData",
         "CA_SynthMissingStatsCount", "CA_SynthMeanProfit", "CA_SynthStdevProfit",
-        "CA_SyntheticRatio", "CA_SynthMeanSharpe", "CA_PassRate", "CA_OverfittingRatio",
-        "CA_OriginalProfit", "CA_OriginalTrades", "CA_SynthSuccessCount", "CA_SynthFailCount",
+        "CA_SyntheticRatio", "CA_SynthMeanSharpe", "CA_PassRate", "CA_PassRateAgainstMonkeys",
+        "CA_OverfittingRatio", "CA_OriginalProfit", "CA_OriginalTrades", "CA_SynthSuccessCount",
+        "CA_SynthFailCount", "CA_SynthSuccessCountAgainstMonkeys", "CA_SynthFailCountAgainstMonkeys",
         "CA_SinteticNetProfits"
     };
 
@@ -1572,7 +1618,8 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
     private static final String[] FULL_SYNTH_KEYS = {
         "CA_SynthMeanProfit", "CA_SynthStdevProfit", "CA_SynthMeanSharpe", "CA_SynthZScoreProfit",
         "CA_OverfittingRatio", "CA_SynthNoData", "CA_OriginalProfit", "CA_OriginalTrades",
-        "CA_SynthFailCount", "CA_SynthSuccessCount", "CA_SynthBadStrategyCount", "CA_SynthExceptionCount"
+        "CA_SynthFailCount", "CA_SynthSuccessCount", "CA_PassRateAgainstMonkeys",
+        "CA_SynthBadStrategyCount", "CA_SynthExceptionCount"
     };
 
     private void clearFullSynthKeys(ResultsGroup rg) {
@@ -1606,6 +1653,47 @@ public class CVSintetica_V08 extends CustomAnalysisMethod {
             s += d * d;
         }
         return Math.sqrt(s / (x.size() - 1));
+    }
+
+    private Double getMonkeyMedianProfit(ResultsGroup rg, String suffix) {
+        try {
+            if (rg != null && rg.specialValues() != null) {
+                String key = "MonkeyTestMedianProfit" + (suffix != null ? suffix : "");
+                if (rg.specialValues().containsKey(key)) {
+                    Object val = rg.specialValues().get(key);
+                    if (val instanceof Number) {
+                        return ((Number) val).doubleValue();
+                    }
+                }
+                if (suffix == null || suffix.isEmpty() || "_FULL".equals(suffix)) {
+                    if (rg.specialValues().containsKey("MonkeyTestMedianProfit")) {
+                        Object val = rg.specialValues().get("MonkeyTestMedianProfit");
+                        if (val instanceof Number) {
+                            return ((Number) val).doubleValue();
+                        }
+                    }
+                }
+            }
+
+            // Fallback: tratar de leerlo del archivo JSON de la caché en disco
+            java.io.File cacheDir = new java.io.File("user/extend/ResultsPlugins/DatabankMonkeyTest/cache");
+            java.io.File metaFile = new java.io.File(cacheDir, rg.getName() + "_monkey_simulation_data.meta.json");
+            if (metaFile.exists()) {
+                String content = new String(java.nio.file.Files.readAllBytes(metaFile.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+                int idx = content.indexOf("\"medianMonkey\":");
+                if (idx != -1) {
+                    int start = idx + "\"medianMonkey\":".length();
+                    int end = content.indexOf(",", start);
+                    if (end != -1) {
+                        String numStr = content.substring(start, end).trim();
+                        return Double.parseDouble(numStr);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logDebug("[" + (rg != null ? rg.getName() : "null") + "] Error loading MonkeyTest median profit: " + e.getMessage());
+        }
+        return null;
     }
 
     // =========================================================

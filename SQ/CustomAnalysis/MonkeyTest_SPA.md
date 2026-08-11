@@ -70,19 +70,19 @@ Como el snippet usa la firma `Per Strategy Analysis`, también puedes selecciona
 
 ## 4. Salidas Esperadas
 
-### Requisito: Instalar la Columna de Databank Monkey Test
+### Requisito: Instalar las Columnas de Databank de Monkey Test
 
 El snippet de Custom Analysis **MonkeyTest** sólo escribe resultados en los metadatos de la estrategia. Para **mostrar** esos resultados como columnas en el databank de SQX, también debes instalar y activar los snippets complementarios de **Databank Column**:
 
-- **Ficheros**: `SQ/Columns/Databanks/MonkeyTestColumn.java` y `SQ/Columns/Databanks/MonkeyTestZScoreColumn.java` (ubicados junto a este snippet bajo `user/extend/Snippets/`)
-- **Nombres de columna en SQX**: `Monkey Test` (tipo: Text) y `Monkey Z-Score` (tipo: Decimal2)
+- **Ficheros**: `SQ/Columns/Databanks/MonkeyTestColumn.java`, `SQ/Columns/Databanks/MonkeyTestZScoreColumn.java` y `SQ/Columns/Databanks/MonkeyMedianProfit.java` (ubicados junto a este snippet bajo `user/extend/Snippets/`)
+- **Nombres de columna en SQX**: `Monkey Test` (tipo: Text), `Monkey Z-Score` (tipo: Decimal2) y `MonkeyMedianProfit` (tipo: Decimal2)
 
 **Pasos de instalación:**
-1. Asegúrate de que ambos ficheros de columna estén presentes en `user/extend/Snippets/SQ/Columns/Databanks/`.
+1. Asegúrate de que los ficheros de columna estén presentes en `user/extend/Snippets/SQ/Columns/Databanks/`.
 2. Reinicia SQX (o fuerza la recompilación de snippets) para que las columnas se registren.
-3. En la vista de Databank, abre el selector de columnas y añade las columnas **"Monkey Test"** / **"Monkey Z-Score"**.
+3. En la vista de Databank, abre el selector de columnas y añade las columnas **"Monkey Test"** / **"Monkey Z-Score"** / **"MonkeyMedianProfit"**.
 
-> **Importante:** ambas columnas deben **recompilarse** tras actualizar este Custom Analysis. Las versiones anteriores ignoraban el selector de sample type del Databank y mostraban el mismo valor almacenado en todas las columnas de periodo.
+> **Importante:** las columnas deben **recompilarse** tras actualizar este Custom Analysis. Las versiones anteriores ignoraban el selector de sample type del Databank y mostraban el mismo valor almacenado en todas las columnas de periodo.
 
 > Sin las Databank Columns instaladas, el test se sigue ejecutando y filtra estrategias mediante la columna `FiltersResult`, pero los resultados individuales (`PASSED`, `FAILED`, `LOW TRADES`, etc.) no serán visibles en la rejilla del databank.
 
@@ -96,6 +96,7 @@ Los resultados se almacenan **por periodo**, usando una clave por sufijo de peri
 | `MonkeyTestResult<sufijo>` | Resultado de ese periodo (ver lista de estados abajo). |
 | `MonkeyTestPercentile<sufijo>` | Percentil de rango alcanzado frente a la distribución de monos, p. ej. `85.20%`. |
 | `MonkeyTestZScore<sufijo>` | Z-Score del beneficio real frente a la media/desviación de los monos. |
+| `MonkeyTestMedianProfit<sufijo>` | Mediana de Net Profit obtenida por los monos en la simulación para ese periodo. |
 | `MonkeyTestResult_Seg_<PERIODO>_<J>` | Resultado del sub-segmento $J$ del periodo (ej. `MonkeyTestResult_Seg_IS_1`). Se genera cuando `SegmentDuration` está activo. |
 | `MonkeyTestPercentile_Seg_<PERIODO>_<J>` | Percentil de rango alcanzado en el sub-segmento $J$ (ej. `MonkeyTestPercentile_Seg_FULL_2`). |
 | `MonkeyTestZScore_Seg_<PERIODO>_<J>` | Z-Score alcanzado en el sub-segmento $J$ (ej. `MonkeyTestZScore_Seg_OOS1_1`). |

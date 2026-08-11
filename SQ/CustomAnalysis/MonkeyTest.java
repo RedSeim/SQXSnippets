@@ -21,7 +21,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
     // Claves publicadas por periodo. Se limpian antes de recalcular cada periodo en scope
     // para que un resultado de una ejecución anterior no sobreviva a un test que falla.
     private static final String[] PERIOD_KEYS = {
-        "MonkeyTestResult", "MonkeyTestPercentile", "MonkeyTestZScore"
+        "MonkeyTestResult", "MonkeyTestPercentile", "MonkeyTestZScore", "MonkeyTestMedianProfit"
     };
 
     public static class Candle {
@@ -77,6 +77,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
         double thresholdVal;
         double meanMonkey;
         double stdMonkey;
+        double medianMonkey;
         double zScore;
         double rankPercentile;
         double meanHoldingPeriod;
@@ -519,6 +520,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
             res.percentileText != null ? res.percentileText : "N/A");
         rg.specialValues().setString("MonkeyTestZScore" + suffix,
             res.zScoreText != null ? res.zScoreText : "N/A");
+        rg.specialValues().set("MonkeyTestMedianProfit" + suffix, res.medianMonkey);
     }
 
     private void runSegmentedSubTests(ResultsGroup rg, String mainResultKey, ArrayList<PeriodDef> periods,
@@ -948,6 +950,16 @@ public class MonkeyTest extends CustomAnalysisMethod {
             res.percentileText = String.format(java.util.Locale.US, "%.2f%%", rankPercentile);
             res.zScoreText = String.format(java.util.Locale.US, "%.2f", zScore);
 
+            double medianMonkey = 0.0;
+            if (sortedProfits != null && sortedProfits.length > 0) {
+                int n = sortedProfits.length;
+                if (n % 2 == 1) {
+                    medianMonkey = sortedProfits[n / 2];
+                } else {
+                    medianMonkey = (sortedProfits[n / 2 - 1] + sortedProfits[n / 2]) / 2.0;
+                }
+            }
+
             res.hasFullStats = true;
             res.curves = curves;
             res.sortedProfits = sortedProfits;
@@ -957,6 +969,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
             res.thresholdVal = thresholdVal;
             res.meanMonkey = mean;
             res.stdMonkey = std;
+            res.medianMonkey = medianMonkey;
             res.zScore = zScore;
             res.rankPercentile = rankPercentile;
             res.meanHoldingPeriod = meanHoldingPeriod;
@@ -1057,6 +1070,7 @@ public class MonkeyTest extends CustomAnalysisMethod {
             metaWriter.println("  \"realProfit\": " + String.format(java.util.Locale.US, "%.2f", res.realProfit) + ",");
             metaWriter.println("  \"monkeyThreshold\": " + String.format(java.util.Locale.US, "%.2f", res.thresholdVal) + ",");
             metaWriter.println("  \"meanMonkey\": " + String.format(java.util.Locale.US, "%.2f", res.meanMonkey) + ",");
+            metaWriter.println("  \"medianMonkey\": " + String.format(java.util.Locale.US, "%.2f", res.medianMonkey) + ",");
             metaWriter.println("  \"stdMonkey\": " + String.format(java.util.Locale.US, "%.2f", res.stdMonkey) + ",");
             metaWriter.println("  \"zScore\": " + String.format(java.util.Locale.US, "%.2f", res.zScore) + ",");
             metaWriter.println("  \"rankPercentile\": " + String.format(java.util.Locale.US, "%.2f", res.rankPercentile) + ",");

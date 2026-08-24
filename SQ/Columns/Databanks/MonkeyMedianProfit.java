@@ -15,47 +15,57 @@ public class MonkeyMedianProfit extends DatabankColumn {
                 0);
 
         setWidth(100);
-        setTooltip("Mediana de Net Profit obtenida en la simulación del Monkey Test para el periodo seleccionado.");
+        setTooltip("Mediana de Net Profit obtenida en la simulacion del Monkey Test para el periodo seleccionado.");
     }
 
     @Override
     public String getValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        String suffix = getSuffix(sampleType);
-        Object v = rg.specialValues().get("MonkeyTestMedianProfit" + suffix);
-        
-        if (v == null && (sampleType == SampleTypes.FullSample || "_Full".equals(suffix))) {
-            v = rg.specialValues().get("MonkeyTestMedianProfit_OOS");
-            if (v == null) {
-                v = rg.specialValues().get("MonkeyTestMedianProfit_IS");
-            }
-            if (v == null) {
-                v = rg.specialValues().get("MonkeyTestMedianProfit");
-            }
-        }
-        
-        if (v == null) return NOT_AVAILABLE;
-
-        double d = (v instanceof Number) ? ((Number) v).doubleValue() : Double.parseDouble(v.toString());
-        return formatDouble(d, 2);
+        Double v = resolve(rg, sampleType);
+        return (v == null) ? NOT_AVAILABLE : formatDouble(v.doubleValue(), 2);
     }
 
     @Override
     public double getNumericValue(ResultsGroup rg, String resultKey, byte direction, byte plType, byte sampleType) throws Exception {
-        String suffix = getSuffix(sampleType);
-        Object v = rg.specialValues().get("MonkeyTestMedianProfit" + suffix);
-        
-        if (v == null && (sampleType == SampleTypes.FullSample || "_Full".equals(suffix))) {
-            v = rg.specialValues().get("MonkeyTestMedianProfit_OOS");
-            if (v == null) {
-                v = rg.specialValues().get("MonkeyTestMedianProfit_IS");
-            }
-            if (v == null) {
-                v = rg.specialValues().get("MonkeyTestMedianProfit");
-            }
+        Double v = resolve(rg, sampleType);
+        return (v == null) ? 0.0 : v.doubleValue();
+    }
+
+    /**
+     * Resuelve la mediana del periodo seleccionado en el Databank. La resolucion es estricta: si
+     * ese periodo no se ha calculado se devuelve null (columna en N/A) en lugar de caer al valor de
+     * otro periodo -- ese fallback era lo que hacia que Full Sample mostrase la mediana del OOS o
+     * del IS como si fuera la del total. La unica excepcion es Full Sample, que acepta la clave
+     * legacy sin sufijo escrita por versiones anteriores del Custom Analysis, exactamente igual que
+     * MonkeyTestColumn y MonkeyTestZScoreColumn.
+     */
+    private Double resolve(ResultsGroup rg, byte sampleType) {
+        Double v = readDouble(rg, "MonkeyTestMedianProfit" + getSuffix(sampleType));
+        if (v != null) {
+            return v;
         }
-        
-        if (v == null) return 0.0;
-        return (v instanceof Number) ? ((Number) v).doubleValue() : Double.parseDouble(v.toString());
+        if (sampleType == SampleTypes.FullSample) {
+            return readDouble(rg, "MonkeyTestMedianProfit");
+        }
+        return null;
+    }
+
+    private Double readDouble(ResultsGroup rg, String key) {
+        try {
+            Object v = rg.specialValues().get(key);
+            if (v == null) {
+                return null;
+            }
+            if (v instanceof Number) {
+                return Double.valueOf(((Number) v).doubleValue());
+            }
+            String s = v.toString().trim();
+            if (s.isEmpty() || "N/A".equals(s)) {
+                return null;
+            }
+            return Double.valueOf(Double.parseDouble(s));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private String getSuffix(byte sampleType) {
@@ -63,6 +73,7 @@ public class MonkeyMedianProfit extends DatabankColumn {
         if (sampleType == SampleTypes.OutOfSample) return "_OOS";
         if (sampleType == SampleTypes.InSampleValidation) return "_ISV";
 
+        // Partes numeradas: OutOfSample1..10 == 21..30, InSampleValidation1..10 == 41..50.
         if (sampleType > SampleTypes.OutOfSample && sampleType <= (byte) (SampleTypes.OutOfSample + 10)) {
             return "_OOS" + (sampleType - SampleTypes.OutOfSample);
         }

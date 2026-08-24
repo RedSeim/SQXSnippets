@@ -13,8 +13,8 @@ import com.strategyquant.datalib.data.io.newDataFormat.RandomAccessReaderFile;
 import com.strategyquant.datalib.data.io.newDataFormat.OhlcDataReader;
 import com.strategyquant.datalib.data.io.VersatileData;
 
-public class MonkeyTest extends CustomAnalysisMethod {
-    public static final Logger Log = LoggerFactory.getLogger(MonkeyTest.class);
+public class MonkeyTest_v1_00 extends CustomAnalysisMethod {
+    public static final Logger Log = LoggerFactory.getLogger(MonkeyTest_v1_00.class);
 
     private static final int MAX_PARTS = 10;
 
@@ -85,8 +85,8 @@ public class MonkeyTest extends CustomAnalysisMethod {
         long tMax;
     }
 
-    public MonkeyTest() {
-        super("MonkeyTest", TYPE_FILTER_STRATEGY);
+    public MonkeyTest_v1_00() {
+        super("MonkeyTest_v1_00", TYPE_FILTER_STRATEGY);
     }
 
     @Override

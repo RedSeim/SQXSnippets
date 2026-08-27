@@ -133,6 +133,7 @@ Como el snippet usa la firma `Per Strategy Analysis`, también puedes selecciona
 | **AutoDiscard** | *(ausente)* | Palabra clave opcional, mismas reglas de detección. Controla si `filterStrategy` puede indicarle al motor de SQX que excluya la estrategia cuando el test falla. **Ausente por defecto: ninguna estrategia se excluye nunca**, sea PASSED o FAILED. | `500,95,OOS2,AutoDiscard` |
 | **Precision=M1** / **M1** | *(ausente: timeframe principal)* | Palabra clave opcional. Ejecuta la simulación sobre los datos históricos de velas de 1 minuto (`SYMBOL_M1.dat` o `SYMBOL_1M.dat`), lo que aumenta la resolución con la que se replica la duración de las operaciones. Si los datos de 1 minuto no están disponibles, se emite una advertencia y se vuelve automáticamente al timeframe principal. | `500,95,FULL,Precision=M1` |
 | **SegmentDuration=N** | *(ausente: off)* | Palabra clave opcional (ej. `SegmentDuration=300`). Divide el periodo analizado en sub-segmentos continuos ajustados a N días y ejecuta el test sobre cada uno, de forma adicional e independiente al test principal. | `500,95,FULL,SegmentDuration=300` |
+| **Debug** | *(ausente)* | Palabra clave opcional, mismas reglas de detección. Escribe un volcado de diagnóstico en `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_v2_debug.log` (ver [sección 4](#volcado-de-diagnóstico-debug)). Sólo vuelca el **primer mono** de cada periodo, y nunca los sub-segmentos de `SegmentDuration`. Ausente por defecto: sin ella no se escribe ningún fichero. | `500,95,OOS2,Debug` |
 
 > **Argumentos eliminados respecto a la v1.00:** `replicationMode` (`SLTP` / `AvgBars` / `IndivBars`) y `shiftingMode` (`Constant` / `Random`) **ya no existen**. La v2.00 siempre simula con duración media diteada y entradas aleatorias sin solapamiento. Si una tarea heredada de la v1.00 los sigue pasando en las posiciones 4 y 5, el snippet los detecta, los ignora y emite una advertencia en el log explicando que ya no aplican.
 
@@ -192,6 +193,31 @@ Las columnas resuelven el sufijo automáticamente a partir del **selector de sam
 * `INSUFFICIENT SPACE`: las operaciones no caben en el periodo sin solaparse. Teóricamente inalcanzable si la estrategia original no solapa operaciones; delata datos corruptos.
 * `FAILED (NO DATA)`: faltaba el fichero histórico `.dat` del símbolo/timeframe.
 * `ERROR`: ocurrió un error de ejecución inesperado.
+
+### Invariantes del layout (siempre activas)
+
+En cada mono se comprueban tres invariantes sobre el reparto de las entradas. **No hay que activarlas**: corren siempre, calladas, y sólo emiten un `WARN` en el log de SQX si alguna se viola.
+
+| Invariante | Qué garantiza |
+| :--- | :--- |
+| **A1** | Cero solapamiento: `entrada[k] ≥ entrada[k-1] + duración[k-1]` |
+| **A2** | Todo dentro de la ventana: la primera entrada no cae antes de `idxMin` y la última salida no pasa de `idxMax` |
+| **A3** | El dithering repartió exactamente las barras planificadas: `Σduración == n·baseBars + numExtra` |
+
+Un `WARN` de A1, A2 o A3 **siempre es un bug del algoritmo de layout, nunca una condición de mercado ni un dato raro**. Si aparece, los resultados de ese periodo no son fiables. Se reporta sólo la primera violación de cada periodo para no inundar el log; el mensaje incluye el número de mono, la operación implicada y los valores concretos.
+
+Corren en todos los monos y no sólo con `Debug` activo a propósito: si sólo se comprobasen en modo diagnóstico, una violación en producción pasaría desapercibida, que es justo el escenario que interesa detectar. El coste es lineal en el número de operaciones y despreciable frente a la propia simulación.
+
+### Volcado de diagnóstico (`Debug`)
+
+Con la palabra clave `Debug` se escribe `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_v2_debug.log`, en dos bloques por periodo:
+
+1. **`CALIBRATION`** — de dónde sale `K`: número de operaciones, `Σ|beneficio bruto|`, `Σ|desplazamiento|`, desplazamiento neto, comisiones totales y **el reparto de `CommSwapApplied` (cuántas órdenes true y cuántas false)**. Ese reparto es diagnóstico por sí solo: si sale mezclado dentro de un mismo periodo, conviene mirarlo con lupa. Incluye también el modo, el spread aplicado, el `tickSize`, la duración media y la ventana de barras.
+2. **`LAYOUT (monkey #0)`** — el reparto completo del primer mono, una fila por operación con `k`, entrada, duración, salida y **`gapToPrev`**. Se vuelcan todas las operaciones y no una muestra, porque el objetivo es auditar el no-solapamiento a mano: **cualquier `gapToPrev` negativo es un solapamiento**. La cabecera indica además si A1/A2/A3 pasaron.
+
+El volcado va a un fichero propio y no al log de SQX porque éste llega a cientos de MB al día y quedaría inservible. El escritor está sincronizado, ya que `Per Strategy Analysis` corre multihilo; cada línea lleva el nombre del hilo, que es el mismo identificador que aparece en el log de SQX y permite correlacionar ambos.
+
+> El fichero se abre en modo **append** y no se rota ni se limpia solo. Conviene borrarlo entre ejecuciones para no mezclar diagnósticos de pasadas distintas.
 
 ### Columna Filters Result
 

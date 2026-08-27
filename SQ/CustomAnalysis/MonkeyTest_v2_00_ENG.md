@@ -133,6 +133,7 @@ Since the snippet uses the `Per Strategy Analysis` signature, you can also selec
 | **AutoDiscard** | *(absent)* | Optional keyword, same detection rules. Controls whether `filterStrategy` may tell the SQX engine to exclude the strategy when the test fails. **Absent by default: no strategy is ever excluded**, whether PASSED or FAILED. | `500,95,OOS2,AutoDiscard` |
 | **Precision=M1** / **M1** | *(absent: main timeframe)* | Optional keyword. Runs the simulation on the 1-minute historical candle data (`SYMBOL_M1.dat` or `SYMBOL_1M.dat`), which increases the resolution at which trade durations are replicated. If 1-minute data is unavailable, a warning is emitted and it automatically falls back to the main timeframe. | `500,95,FULL,Precision=M1` |
 | **SegmentDuration=N** | *(absent: off)* | Optional keyword (e.g. `SegmentDuration=300`). Splits the analysed period into continuous sub-segments sized to N days and runs the test on each one, additionally and independently of the main test. | `500,95,FULL,SegmentDuration=300` |
+| **Debug** | *(absent)* | Optional keyword, same detection rules. Writes a diagnostic dump to `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_v2_debug.log` (see [section 4](#diagnostic-dump-debug)). It dumps only the **first monkey** of each period, and never the `SegmentDuration` sub-segments. Absent by default: without it no file is written. | `500,95,OOS2,Debug` |
 
 > **Arguments removed relative to v1.00:** `replicationMode` (`SLTP` / `AvgBars` / `IndivBars`) and `shiftingMode` (`Constant` / `Random`) **no longer exist**. v2.00 always simulates with dithered average duration and random non-overlapping entries. If a task inherited from v1.00 still passes them in positions 4 and 5, the snippet detects them, ignores them, and emits a warning in the log explaining that they no longer apply.
 
@@ -192,6 +193,31 @@ The columns resolve the suffix automatically from the **Databank sample type sel
 * `INSUFFICIENT SPACE`: the trades do not fit in the period without overlapping. Theoretically unreachable if the original strategy does not overlap trades; it indicates corrupt data.
 * `FAILED (NO DATA)`: the symbol/timeframe `.dat` history file was missing.
 * `ERROR`: an unexpected runtime error occurred.
+
+### Layout invariants (always on)
+
+Three invariants on the entry layout are checked for every monkey. **There is nothing to enable**: they always run, silently, and only emit a `WARN` in the SQX log if one is violated.
+
+| Invariant | What it guarantees |
+| :--- | :--- |
+| **A1** | Zero overlap: `entry[k] ≥ entry[k-1] + duration[k-1]` |
+| **A2** | Everything inside the window: the first entry does not fall before `idxMin` and the last exit does not pass `idxMax` |
+| **A3** | The dithering distributed exactly the planned bars: `Σduration == n·baseBars + numExtra` |
+
+A `WARN` from A1, A2 or A3 is **always a bug in the layout algorithm, never a market condition or an odd piece of data**. If one appears, that period's results are not trustworthy. Only the first violation per period is reported so as not to flood the log; the message includes the monkey number, the trade involved and the concrete values.
+
+They run on every monkey and not only with `Debug` enabled, deliberately: if they were only checked in diagnostic mode, a violation in production would go unnoticed — which is exactly the scenario worth detecting. The cost is linear in the number of trades and negligible against the simulation itself.
+
+### Diagnostic dump (`Debug`)
+
+With the `Debug` keyword, `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_v2_debug.log` is written, in two blocks per period:
+
+1. **`CALIBRATION`** — where `K` comes from: number of trades, `Σ|gross profit|`, `Σ|displacement|`, net displacement, total commissions and **the `CommSwapApplied` split (how many orders true and how many false)**. That split is diagnostic on its own: if it comes out mixed within a single period, it is worth a close look. It also includes the mode, the applied spread, the `tickSize`, the average duration and the bar window.
+2. **`LAYOUT (monkey #0)`** — the complete layout of the first monkey, one row per trade with `k`, entry, duration, exit and **`gapToPrev`**. All trades are dumped rather than a sample, because the point is to audit the non-overlap by hand: **any negative `gapToPrev` is an overlap**. The header also states whether A1/A2/A3 passed.
+
+The dump goes to its own file rather than the SQX log because the latter reaches hundreds of MB per day and would become unusable. The writer is synchronised, since `Per Strategy Analysis` runs multi-threaded; each line carries the thread name, which is the same identifier that appears in the SQX log and lets you correlate the two.
+
+> The file is opened in **append** mode and is neither rotated nor cleared automatically. Delete it between runs so diagnostics from different passes do not get mixed.
 
 ### Filters Result column
 

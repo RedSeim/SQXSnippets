@@ -31,6 +31,14 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
     private static final int MAX_PARTS = 10;
     private static final int MIN_TRADES = 20;
 
+    // Volcado verboso de la palabra clave Debug. Va a un fichero propio y no al log de SQX, que
+    // llega a 800 MB/dia y quedaria inservible. La ruta es RELATIVA a la raiz de instalacion de
+    // SQX (el working directory de la JVM), igual que el cacheDir del ResultsPlugin, de modo que
+    // sigue siendo valida tras reinstalar o mover SQX. Mismo patron que CVSintetica_V08.logDebug.
+    private static final String DEBUG_LOG_DIR = "user/extend/Snippets/SQ/CustomAnalysis";
+    private static final String DEBUG_LOG_NAME = "MonkeyTest_v2_debug.log";
+    private static boolean debugWriteErrorReported = false;
+
     /** Claves publicadas por periodo. Se limpian antes de recalcular cada periodo en scope. */
     private static final String[] PERIOD_KEYS = {
         "MonkeyTestResult", "MonkeyTestPercentile", "MonkeyTestZScore", "MonkeyTestMedianProfit",
@@ -134,6 +142,7 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
         PeriodDef requested = new PeriodDef(SampleTypes.FullSample, "_Full");
         boolean writeResultsPluginCache = false;
         boolean autoDiscard = false;
+        boolean debugDump = false;
         boolean useM1Precision = false;
         double segmentDurationDays = 0.0;
 
@@ -159,6 +168,11 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
                 }
                 if (upperArgs.contains("AUTODISCARD")) {
                     autoDiscard = true;
+                }
+                // Ninguna otra palabra clave ni nombre de periodo contiene "DEBUG", asi que la
+                // deteccion por subcadena no puede dar falsos positivos.
+                if (upperArgs.contains("DEBUG")) {
+                    debugDump = true;
                 }
                 useM1Precision = detectM1Precision(upperArgs);
                 segmentDurationDays = parseSegmentDuration(inputArgs);
@@ -211,7 +225,8 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
                 } else {
                     OrdersList orders = resolveOrders(rg, mainResultKey, pd);
                     boolean needCurves = writeResultsPluginCache && pd.suffix.equals(requested.suffix);
-                    res = runMonkeyTestForPeriod(rg, ctx, pd, orders, simCandles, numMonkeys, percentile, rng, needCurves);
+                    res = runMonkeyTestForPeriod(rg, ctx, pd, orders, simCandles, numMonkeys, percentile, rng,
+                        needCurves, debugDump);
                 }
 
                 publishPeriodResult(rg, pd, res);
@@ -884,8 +899,11 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
                         }
                     }
 
+                    // El volcado va desactivado en la ruta segmentada aunque Debug este presente:
+                    // un SegmentDuration sobre FULL genera decenas de sub-segmentos y multiplicaria
+                    // el fichero sin mostrar nada que el periodo principal no muestre ya.
                     PeriodResult subRes = runMonkeyTestForPeriod(rg, ctx, pd, subOrders, subCandles,
-                        numMonkeys, percentile, rng, false);
+                        numMonkeys, percentile, rng, false, false);
 
                     writeKeys(rg, "_Seg_" + label + "_" + j, subRes);
                 }
@@ -907,7 +925,7 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
     private PeriodResult runMonkeyTestForPeriod(ResultsGroup rg, StrategyContext ctx, PeriodDef pd,
                                                 OrdersList orders, ArrayList<Candle> simCandles,
                                                 int numMonkeys, double percentile, Random rng,
-                                                boolean needCurves) {
+                                                boolean needCurves, boolean debugDump) {
         PeriodResult res = new PeriodResult();
         res.modeLabel = ctx.modeLabel;
         res.spreadPoints = ctx.spreadPoints;
@@ -953,6 +971,8 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
             double sumAbsUnit = 0.0;
             double sumUnit = 0.0;
             double commSwapTotal = 0.0;
+            int commApplied = 0;
+            int commNotApplied = 0;
 
             for (int i = 0; i < n; i++) {
                 Order o = tradeOrders.get(i);
@@ -964,6 +984,11 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
                 // CommSwapApplied indica si CommSwap ya esta sumado dentro de PL. La v1 lo restaba
                 // siempre e incondicionalmente, lo que duplicaba los costes cuando no lo estaba.
                 double gross = o.CommSwapApplied ? (o.PL - o.CommSwap) : o.PL;
+                if (o.CommSwapApplied) {
+                    commApplied++;
+                } else {
+                    commNotApplied++;
+                }
 
                 sumAbsGross += Math.abs(gross);
                 sumAbsUnit += Math.abs(unit);
@@ -1030,9 +1055,18 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
             int targetTotalBars = n * baseBars + numExtra;
             res.exposureRatio = (sumBars > 0) ? (targetTotalBars / sumBars) : 1.0;
 
+            // El volcado va ANTES de la guarda para que un INSUFFICIENT SPACE quede diagnosticado.
+            if (debugDump) {
+                dumpCalibration(rg, pd, ctx, n, sumAbsGross, sumAbsUnit, sumUnit, commSwapTotal,
+                    commApplied, commNotApplied, ratioK, exactBars, baseBars, numExtra,
+                    idxMin, idxMax, m, res.exposureRatio);
+            }
+
             // Sin solapamiento en la estrategia original se cumple sum(dur) <= M, asi que esto es
             // teoricamente inalcanzable; la guarda existe para detectar datos corruptos.
-            if (targetTotalBars > m) {
+            // El requisito real es sumDur <= m-1: con sumDur == m exacto la holgura seria cero y
+            // la ultima salida caeria en idxMax+1, una barra fuera de la ventana evaluada.
+            if (targetTotalBars >= m) {
                 res.status = "INSUFFICIENT SPACE";
                 Log.warn("MonkeyTest v2: strategy [" + rg.getName() + "] period " + pd.label()
                     + " needs " + targetTotalBars + " bars for " + n + " trades but the period only spans " + m
@@ -1049,9 +1083,27 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
             double[] monkeyProfits = new double[numMonkeys];
             double[][] curves = needCurves ? new double[numMonkeys][] : null;
 
+            boolean invariantsWarned = false;
+
             for (int mk = 0; mk < numMonkeys; mk++) {
                 int[] dur = ditherDurations(n, baseBars, numExtra, rng);
                 int[] entries = layoutEntries(idxMin, m, dur, rng);
+
+                // Las invariantes se comprueban SIEMPRE, no solo en modo debug: si solo corriesen
+                // con Debug activo, una violacion en produccion pasaria desapercibida, que es justo
+                // el escenario a detectar. Solo se reporta la primera de cada periodo.
+                String violation = checkLayoutInvariants(entries, dur, idxMin, idxMax, baseBars, numExtra);
+                if (violation != null && !invariantsWarned) {
+                    invariantsWarned = true;
+                    Log.warn("MonkeyTest v2: LAYOUT INVARIANT VIOLATED for [" + rg.getName() + "] "
+                        + pd.label() + " monkey #" + mk + " -- " + violation
+                        + ". This is a bug in the layout algorithm, never a market condition."
+                        + " Further violations in this period are not reported.");
+                }
+
+                if (debugDump && mk == 0) {
+                    dumpMonkeyLayout(rg, pd, idxMin, m, entries, dur, violation);
+                }
 
                 double acc = 0.0;
                 double[] curve = needCurves ? new double[n + 1] : null;
@@ -1244,6 +1296,148 @@ public class MonkeyTest_v2_00 extends CustomAnalysisMethod {
             prevCut = cut;
         }
         return entries;
+    }
+
+    /**
+     * Comprueba las tres invariantes del layout de un mono. Devuelve null si todo esta bien, o el
+     * mensaje describiendo la primera violacion encontrada. Coste O(n), despreciable frente a la
+     * simulacion, asi que corre en todos los monos y no solo en modo debug.
+     */
+    private String checkLayoutInvariants(int[] entries, int[] dur, int idxMin, int idxMax,
+                                         int baseBars, int numExtra) {
+        int n = dur.length;
+        if (n == 0) {
+            return null;
+        }
+
+        // A3: el dithering repartio exactamente las barras planificadas.
+        int sumDur = 0;
+        for (int d : dur) {
+            sumDur += d;
+        }
+        int expected = n * baseBars + numExtra;
+        if (sumDur != expected) {
+            return "A3 (dithering count): sum(dur)=" + sumDur + " but n*baseBars+numExtra=" + expected;
+        }
+
+        // A2 (inicio): ningun mono empieza antes de la ventana.
+        if (entries[0] < idxMin) {
+            return "A2 (window start): entries[0]=" + entries[0] + " < idxMin=" + idxMin;
+        }
+
+        // A1: cero solapamiento entre operaciones consecutivas.
+        for (int k = 1; k < n; k++) {
+            if (entries[k] < entries[k - 1] + dur[k - 1]) {
+                return "A1 (overlap) at k=" + k + ": entries[" + k + "]=" + entries[k]
+                    + " < entries[" + (k - 1) + "]+dur[" + (k - 1) + "]=" + (entries[k - 1] + dur[k - 1]);
+            }
+        }
+
+        // A2 (fin): la ultima salida cae dentro de la ventana evaluada.
+        int lastExit = entries[n - 1] + dur[n - 1];
+        if (lastExit > idxMax) {
+            return "A2 (window end): last exit=" + lastExit + " > idxMax=" + idxMax;
+        }
+
+        return null;
+    }
+
+    private static String dbgFmt(double v) {
+        return String.format(java.util.Locale.US, "%.6f", v);
+    }
+
+    /** Bloque 1 del volcado: de donde sale K y con que costes. Una vez por periodo. */
+    private void dumpCalibration(ResultsGroup rg, PeriodDef pd, StrategyContext ctx, int n,
+                                 double sumAbsGross, double sumAbsUnit, double sumUnit,
+                                 double commSwapTotal, int commApplied, int commNotApplied,
+                                 double ratioK, double exactBars, int baseBars, int numExtra,
+                                 int idxMin, int idxMax, int m, double exposureRatio) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== [").append(rg.getName()).append("] ").append(pd.label())
+          .append(" | CALIBRATION ===\n");
+        sb.append("  mode=").append(ctx.modeLabel)
+          .append(" mm=").append(ctx.mmName)
+          .append(" tickSize=").append(ctx.tickSize)
+          .append(" spreadPoints=").append(ctx.spreadPoints)
+          .append(" spreadPrice=").append(ctx.spreadPrice).append("\n");
+        sb.append("  trades=").append(n)
+          .append(" sumAbsGross=").append(dbgFmt(sumAbsGross))
+          .append(" sumAbsUnit=").append(dbgFmt(sumAbsUnit))
+          .append(" sumUnit=").append(dbgFmt(sumUnit)).append("\n");
+        sb.append("  ratioK=").append(dbgFmt(ratioK)).append("   (sumAbsGross / sumAbsUnit)\n");
+        sb.append("  commSwapTotal=").append(dbgFmt(commSwapTotal))
+          .append("   CommSwapApplied: true=").append(commApplied)
+          .append(" false=").append(commNotApplied).append("\n");
+        sb.append("  exactBars=").append(dbgFmt(exactBars))
+          .append(" baseBars=").append(baseBars)
+          .append(" numExtra=").append(numExtra)
+          .append(" exposureRatio=").append(dbgFmt(exposureRatio)).append("\n");
+        sb.append("  window: idxMin=").append(idxMin).append(" idxMax=").append(idxMax)
+          .append(" m=").append(m);
+        logDebugDump(sb.toString());
+    }
+
+    /**
+     * Bloque 2 del volcado: el reparto completo del primer mono. Se vuelcan todas las operaciones y
+     * no una muestra, porque el objetivo es auditar el no-solapamiento a mano: cualquier valor
+     * negativo en la columna gapToPrev es un solapamiento.
+     */
+    private void dumpMonkeyLayout(ResultsGroup rg, PeriodDef pd, int idxMin, int m,
+                                  int[] entries, int[] dur, String violation) {
+        int n = dur.length;
+        int sumDur = 0;
+        for (int d : dur) {
+            sumDur += d;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== [").append(rg.getName()).append("] ").append(pd.label())
+          .append(" | LAYOUT (monkey #0) ===\n");
+        sb.append("  sumDur=").append(sumDur).append(" slack=").append(m - sumDur)
+          .append(" firstEntry=").append(entries[0])
+          .append(" lastExit=").append(entries[n - 1] + dur[n - 1]).append("\n");
+        sb.append("  invariants: ")
+          .append(violation == null ? "A1 PASS  A2 PASS  A3 PASS" : ("FAIL -> " + violation))
+          .append("\n");
+        sb.append("  k\tentry\tdur\texit\tgapToPrev\n");
+        for (int k = 0; k < n; k++) {
+            int exit = entries[k] + dur[k];
+            int gap = (k == 0) ? (entries[0] - idxMin) : (entries[k] - (entries[k - 1] + dur[k - 1]));
+            sb.append("  ").append(k).append('\t').append(entries[k]).append('\t')
+              .append(dur[k]).append('\t').append(exit).append('\t').append(gap)
+              .append('\n');
+        }
+        logDebugDump(sb.toString());
+    }
+
+    /**
+     * Escritor del volcado. Es static synchronized porque Per Strategy Analysis corre multihilo y
+     * sin sincronizar las lineas se entrelazarian. Un error de escritura no tumba el analisis, pero
+     * el primero SI se reporta: ignorarlos en silencio es lo que hizo que una ruta obsoleta pasara
+     * desapercibida en CVSintetica.
+     */
+    private static synchronized void logDebugDump(String msg) {
+        java.io.PrintWriter pw = null;
+        try {
+            java.io.File dir = new java.io.File(DEBUG_LOG_DIR);
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            pw = new java.io.PrintWriter(new java.io.FileWriter(new java.io.File(dir, DEBUG_LOG_NAME), true));
+            String ts = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new java.util.Date());
+            pw.println("[" + ts + "] [" + Thread.currentThread().getName() + "] " + msg);
+        } catch (Exception e) {
+            if (!debugWriteErrorReported) {
+                debugWriteErrorReported = true;
+                Log.warn("MonkeyTest v2: could not write the debug dump to " + DEBUG_LOG_DIR + "/"
+                    + DEBUG_LOG_NAME + ": " + e.getMessage()
+                    + ". Further write errors are not reported.");
+            }
+        } finally {
+            if (pw != null) {
+                pw.close();
+            }
+        }
     }
 
     /** Net Profit que reporta SQX para el periodo. Solo se usa para diagnostico en el log. */

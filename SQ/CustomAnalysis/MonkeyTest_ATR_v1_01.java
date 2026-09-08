@@ -15,9 +15,9 @@ import com.strategyquant.datalib.data.io.newDataFormat.OhlcDataReader;
 import com.strategyquant.datalib.data.io.VersatileData;
 
 /**
- * Monkey Test ATR v1.00 -- Monte Carlo permutation test del EDGE GEOMETRICO de una estrategia.
+ * Monkey Test ATR v1.01 -- Monte Carlo permutation test del EDGE GEOMETRICO de una estrategia.
  *
- * A diferencia de MonkeyTest_ATR_v1_00, que mide el edge en dinero calibrando un ratio K, esta version
+ * A diferencia de MonkeyTest_v2_00, que mide el edge en dinero calibrando un ratio K, esta version
  * NO convierte nunca a dinero: mide el desplazamiento de precio de cada operacion NORMALIZADO POR EL
  * ATR vigente en su entrada, y compara la suma de la estrategia contra la de N monos.
  *
@@ -29,10 +29,10 @@ import com.strategyquant.datalib.data.io.VersatileData;
  * Al no tocar cuantias monetarias desaparece la necesidad de distinguir MODO A y MODO B: el money
  * management solo hacia falta para convertir desplazamiento en euros.
  *
- * Las decisiones de diseno y su justificacion estan en MonkeyTest_ATR_v1_00_ENG.md / _SPA.md.
+ * Las decisiones de diseno y su justificacion estan en MonkeyTest_ATR_v1_01_ENG.md / _SPA.md.
  */
-public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
-    public static final Logger Log = LoggerFactory.getLogger(MonkeyTest_ATR_v1_00.class);
+public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
+    public static final Logger Log = LoggerFactory.getLogger(MonkeyTest_ATR_v1_01.class);
 
     private static final int MAX_PARTS = 10;
     private static final int MIN_TRADES = 20;
@@ -42,7 +42,7 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
     // SQX (el working directory de la JVM), igual que el cacheDir del ResultsPlugin, de modo que
     // sigue siendo valida tras reinstalar o mover SQX. Mismo patron que CVSintetica_V08.logDebug.
     private static final String DEBUG_LOG_DIR = "user/extend/Snippets/SQ/CustomAnalysis";
-    private static final String DEBUG_LOG_NAME = "MonkeyTest_ATR_v1_debug.log";
+    private static final String DEBUG_LOG_NAME = "MonkeyTest_ATR_v1_01_debug.log";
     private static boolean debugWriteErrorReported = false;
 
     /** Claves publicadas por periodo. Se limpian antes de recalcular cada periodo en scope. */
@@ -104,6 +104,36 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
         String spreadSource = "none";
     }
 
+    /**
+     * Plan de duraciones de UN grupo direccional (las operaciones en largo, o las que van en corto).
+     * Cada grupo tiene su propia bolsa de duraciones para que los monos repliquen no solo la
+     * exposicion total, sino cuanta de esa exposicion correspondia a cada direccion. Ver la
+     * seccion 5.16 de la documentacion.
+     *
+     * NOTA DE TERMINOLOGIA: en este fichero "largo"/"corto" (long/short) se reservan SIEMPRE para
+     * la DIRECCION de la operacion. Para hablar de cuanto dura una operacion se dice "duracion",
+     * nunca "larga" o "corta", que resultaria ambiguo.
+     */
+    private static class DirPlan {
+        /** Cuantas operaciones reales tiene el grupo. */
+        int count = 0;
+        /** Duracion media exacta del grupo, en barras fraccionarias. */
+        double exactBars = 0.0;
+        /** Duracion entera que recibe cada operacion del grupo. */
+        int baseBars = 0;
+        /** Cuantas operaciones del grupo reciben una barra extra, para cuadrar la media. */
+        int numExtra = 0;
+        /** Barras totales que el grupo ocupara en cada mono: count*baseBars + numExtra. */
+        int totalBars = 0;
+        /** true si baseBars se saturo a 1 porque la media del grupo caia por debajo de una barra. */
+        boolean clamped = false;
+
+        /** Exposicion planificada frente a la real del grupo. 1.0 = replicada con exactitud. */
+        double exposureRatio(double realBars) {
+            return (realBars > 0) ? (totalBars / realBars) : 1.0;
+        }
+    }
+
     /** Resultado del test para un periodo concreto, incluido lo necesario para escribir la cache. */
     private static class PeriodResult {
         String status = "ERROR";
@@ -142,8 +172,8 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
         double atrEdgeCorrelation;
     }
 
-    public MonkeyTest_ATR_v1_00() {
-        super("MonkeyTest_ATR_v1_00", TYPE_FILTER_STRATEGY);
+    public MonkeyTest_ATR_v1_01() {
+        super("MonkeyTest_ATR_v1_01", TYPE_FILTER_STRATEGY);
     }
 
     @Override
@@ -1020,30 +1050,38 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
             double[] atrAtSim = buildAtrForWindow(simCandles, atrCandles, atrArray, idxMin, m,
                 atrFloor, windowFloorHits);
 
-            // --- 5. Duracion media y dithering ------------------------------------------------
-            double sumBars = 0.0;
+            // --- 5. Duracion media y dithering, POR DIRECCION ---------------------------------
+            // La duracion se promedia por separado para las operaciones en largo y para las que
+            // van en corto. Promediarlas juntas borraria la asimetria direccional de la exposicion
+            // y abriria un falso positivo: una estrategia que aguanta mas tiempo en la direccion en
+            // que el mercado deriva capturaria esa deriva sin que los monos pudieran replicarla, y
+            // el test lo leeria como edge de timing. Ver la seccion 5.16 de la documentacion.
+            double sumBarsLong = 0.0;
+            double sumBarsShort = 0.0;
+            int nLong = 0;
+            int nShort = 0;
             for (int i = 0; i < n; i++) {
                 Order o = tradeOrders.get(i);
                 double d = posOf(simCandles, o.CloseTime, tfMs) - posOf(simCandles, o.OpenTime, tfMs);
-                if (d > 0) {
-                    sumBars += d;
+                // La operacion cuenta en su grupo aunque su duracion no sea positiva, igual que
+                // antes contaba en el total: solo se descarta su aportacion a la suma.
+                if (dirs[i] > 0) {
+                    nLong++;
+                    if (d > 0) sumBarsLong += d;
+                } else {
+                    nShort++;
+                    if (d > 0) sumBarsShort += d;
                 }
             }
+            double sumBars = sumBarsLong + sumBarsShort;
+
+            DirPlan planLong = planDirection(nLong, sumBarsLong, "long", rg, pd);
+            DirPlan planShort = planDirection(nShort, sumBarsShort, "short", rg, pd);
+
             double exactBars = sumBars / n;
             res.exactBars = exactBars;
 
-            int baseBars = (int) Math.floor(exactBars);
-            if (baseBars < 1) {
-                Log.warn("MonkeyTest ATR v1: strategy [" + rg.getName() + "] period " + pd.label()
-                    + " has an average trade duration below one bar (" + String.format(java.util.Locale.US, "%.3f", exactBars)
-                    + "). Consider Precision=M1 for a meaningful simulation.");
-                baseBars = 1;
-            }
-            int numExtra = (int) Math.round(n * (exactBars - Math.floor(exactBars)));
-            if (numExtra < 0) numExtra = 0;
-            if (numExtra > n) numExtra = n;
-
-            int targetTotalBars = n * baseBars + numExtra;
+            int targetTotalBars = planLong.totalBars + planShort.totalBars;
             res.exposureRatio = (sumBars > 0) ? (targetTotalBars / sumBars) : 1.0;
 
             res.edgeReal = edgeReal;
@@ -1052,7 +1090,8 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
             // El volcado va ANTES de la guarda para que un INSUFFICIENT SPACE quede diagnosticado.
             if (debugDump) {
                 dumpAtrStats(rg, pd, ctx, n, edgeReal, sumAbsAtrDisp, atrPeriod, res,
-                    windowFloorHits[0], exactBars, baseBars, numExtra, idxMin, idxMax, m);
+                    windowFloorHits[0], exactBars, planLong, planShort, sumBarsLong, sumBarsShort,
+                    idxMin, idxMax, m);
             }
 
             // Sin solapamiento en la estrategia original se cumple sum(dur) <= M, asi que esto es
@@ -1072,13 +1111,37 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
             boolean invariantsWarned = false;
 
             for (int mk = 0; mk < numMonkeys; mk++) {
-                int[] dur = ditherDurations(n, baseBars, numExtra, rng);
+                // Cada grupo direccional sortea sus duraciones dentro de su propia bolsa, de modo
+                // que la exposicion total de las operaciones en largo y la de las que van en corto
+                // se replican por separado.
+                int[] durLong = ditherDurations(planLong.count, planLong.baseBars, planLong.numExtra, rng);
+                int[] durShort = ditherDurations(planShort.count, planShort.baseBars, planShort.numExtra, rng);
+
+                // Los pares (direccion, duracion) se combinan y se barajan JUNTOS: el orden en el
+                // tiempo pasa a ser completamente aleatorio y distinto en cada mono, pero cada
+                // duracion sigue pegada a la direccion cuya bolsa la genero.
+                int[] mkDirs = new int[n];
+                int[] dur = new int[n];
+                int w = 0;
+                for (int i = 0; i < durLong.length; i++) {
+                    mkDirs[w] = 1;
+                    dur[w] = durLong[i];
+                    w++;
+                }
+                for (int i = 0; i < durShort.length; i++) {
+                    mkDirs[w] = -1;
+                    dur[w] = durShort[i];
+                    w++;
+                }
+                shufflePairs(mkDirs, dur, rng);
+
                 int[] entries = layoutEntries(idxMin, m, dur, rng);
 
                 // Las invariantes se comprueban SIEMPRE, no solo en modo debug: si solo corriesen
                 // con Debug activo, una violacion en produccion pasaria desapercibida, que es justo
                 // el escenario a detectar. Solo se reporta la primera de cada periodo.
-                String violation = checkLayoutInvariants(entries, dur, idxMin, idxMax, baseBars, numExtra);
+                String violation = checkLayoutInvariants(entries, dur, mkDirs, idxMin, idxMax,
+                    planLong, planShort);
                 if (violation != null && !invariantsWarned) {
                     invariantsWarned = true;
                     Log.warn("MonkeyTest ATR v1: LAYOUT INVARIANT VIOLATED for [" + rg.getName() + "] "
@@ -1088,7 +1151,7 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
                 }
 
                 if (debugDump && mk == 0) {
-                    dumpMonkeyLayout(rg, pd, idxMin, m, entries, dur, violation);
+                    dumpMonkeyLayout(rg, pd, idxMin, m, entries, dur, mkDirs, violation);
                 }
 
                 double acc = 0.0;
@@ -1107,7 +1170,7 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
                     // El spread se resta en unidades de PRECIO y antes de normalizar, porque es un
                     // desplazamiento de precio: entrar en ask y salir en bid equivale a penalizar
                     // el desplazamiento en un spread completo.
-                    double disp = (exitPrice - entryPrice) * dirs[k] - ctx.spreadPrice;
+                    double disp = (exitPrice - entryPrice) * mkDirs[k] - ctx.spreadPrice;
 
                     int wIdx = entryIdx - idxMin;
                     double atrHere = (wIdx >= 0 && wIdx < atrAtSim.length) ? atrAtSim[wIdx] : atrFloor;
@@ -1160,7 +1223,8 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
             Log.info("MonkeyTest ATR v1 [" + rg.getName() + "] " + pd.label()
                 + ": atrPeriod=" + atrPeriod
                 + " trades=" + n + " avgBars=" + String.format(java.util.Locale.US, "%.4f", exactBars)
-                + " (base=" + baseBars + " extra=" + numExtra + ")"
+                + " (long=" + planLong.count + "@" + planLong.baseBars + "+" + planLong.numExtra
+                + " short=" + planShort.count + "@" + planShort.baseBars + "+" + planShort.numExtra + ")"
                 + " exposureRatio=" + String.format(java.util.Locale.US, "%.4f", res.exposureRatio)
                 + " edge=" + String.format(java.util.Locale.US, "%.4f", edgeReal)
                 + " edge/trade=" + String.format(java.util.Locale.US, "%.4f", res.edgePerTrade)
@@ -1334,11 +1398,70 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
     }
 
     /**
-     * Reparte las numExtra barras extra entre trades elegidos al azar, sin repeticion (Fisher-Yates
-     * parcial). El numero de trades largos es siempre exactamente numExtra, asi que la exposicion
-     * total es identica en todos los monos: solo se aleatoriza CUALES son, no CUANTOS. Una
-     * probabilidad independiente por trade parece mas aleatoria pero haria variar la exposicion
-     * entre monos segun una binomial, destruyendo justo la propiedad que los hace comparables.
+     * Calcula el plan de duraciones de UN grupo direccional: cuantas barras recibe cada operacion
+     * del grupo para que su duracion media reproduzca la de las operaciones reales de esa misma
+     * direccion. Un grupo vacio (estrategia que solo opera en un sentido) devuelve un plan a cero,
+     * que mas adelante genera un array de duraciones vacio sin necesidad de casos especiales.
+     */
+    private DirPlan planDirection(int count, double sumBarsDir, String dirLabel,
+                                  ResultsGroup rg, PeriodDef pd) {
+        DirPlan p = new DirPlan();
+        p.count = count;
+        if (count == 0) {
+            return p;
+        }
+
+        p.exactBars = sumBarsDir / count;
+        p.baseBars = (int) Math.floor(p.exactBars);
+        if (p.baseBars < 1) {
+            // Saturar a una barra sobreexpone este grupo. Al planificar por direccion el aviso
+            // tiene que nombrar CUAL, porque puede afectar a un sentido y al otro no -- algo que
+            // la media global de antes disimulaba.
+            Log.warn("MonkeyTest ATR v1: strategy [" + rg.getName() + "] period " + pd.label()
+                + " has an average " + dirLabel + " trade duration below one bar ("
+                + String.format(java.util.Locale.US, "%.3f", p.exactBars)
+                + "), so its exposure will be inflated. Consider Precision=M1 for a meaningful simulation.");
+            p.baseBars = 1;
+            p.clamped = true;
+        }
+
+        p.numExtra = (int) Math.round(count * (p.exactBars - Math.floor(p.exactBars)));
+        if (p.numExtra < 0) p.numExtra = 0;
+        if (p.numExtra > count) p.numExtra = count;
+
+        p.totalBars = count * p.baseBars + p.numExtra;
+        return p;
+    }
+
+    /**
+     * Baraja en bloque los pares (direccion, duracion) con Fisher-Yates completo: cualquiera de las
+     * n! secuencias es igual de probable, asi que el orden en el tiempo no arrastra nada del orden
+     * original de la estrategia. Intercambiar los DOS arrays a la vez es lo que mantiene cada
+     * duracion pegada a la direccion cuya bolsa la genero, de modo que la exposicion total de cada
+     * direccion se conserva por mucho que el orden cambie. Una permutacion no altera un
+     * multiconjunto, asi que el numero de operaciones de cada sentido tampoco varia.
+     */
+    private void shufflePairs(int[] dirsOut, int[] durOut, Random rng) {
+        for (int i = dirsOut.length - 1; i > 0; i--) {
+            int j = rng.nextInt(i + 1);
+
+            int tmpDir = dirsOut[i];
+            dirsOut[i] = dirsOut[j];
+            dirsOut[j] = tmpDir;
+
+            int tmpDur = durOut[i];
+            durOut[i] = durOut[j];
+            durOut[j] = tmpDur;
+        }
+    }
+
+    /**
+     * Reparte las numExtra barras extra entre operaciones elegidas al azar, sin repeticion
+     * (Fisher-Yates parcial). El numero de operaciones que reciben la barra extra es siempre
+     * exactamente numExtra, asi que la exposicion total es identica en todos los monos: solo se
+     * aleatoriza CUALES la reciben, no CUANTAS. Una probabilidad independiente por operacion parece
+     * mas aleatoria pero haria variar la exposicion entre monos segun una binomial, destruyendo
+     * justo la propiedad que los hace comparables.
      */
     private int[] ditherDurations(int n, int baseBars, int numExtra, Random rng) {
         int[] dur = new int[n];
@@ -1396,25 +1519,51 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
     }
 
     /**
-     * Comprueba las tres invariantes del layout de un mono. Devuelve null si todo esta bien, o el
+     * Comprueba las cuatro invariantes del layout de un mono. Devuelve null si todo esta bien, o el
      * mensaje describiendo la primera violacion encontrada. Coste O(n), despreciable frente a la
      * simulacion, asi que corre en todos los monos y no solo en modo debug.
      */
-    private String checkLayoutInvariants(int[] entries, int[] dur, int idxMin, int idxMax,
-                                         int baseBars, int numExtra) {
+    private String checkLayoutInvariants(int[] entries, int[] dur, int[] mkDirs,
+                                         int idxMin, int idxMax,
+                                         DirPlan planLong, DirPlan planShort) {
         int n = dur.length;
         if (n == 0) {
             return null;
         }
 
-        // A3: el dithering repartio exactamente las barras planificadas.
-        int sumDur = 0;
-        for (int d : dur) {
-            sumDur += d;
+        // A3: el dithering repartio exactamente las barras planificadas, EN CADA DIRECCION. Es la
+        // comprobacion que garantiza que el mono replica no solo la exposicion total, sino cuanta
+        // corresponde a cada sentido. Subsume la version global anterior, porque si ambos grupos
+        // cuadran su suma tambien cuadra.
+        int sumDurLong = 0;
+        int sumDurShort = 0;
+        int countLong = 0;
+        int countShort = 0;
+        for (int k = 0; k < n; k++) {
+            if (mkDirs[k] > 0) {
+                countLong++;
+                sumDurLong += dur[k];
+            } else {
+                countShort++;
+                sumDurShort += dur[k];
+            }
         }
-        int expected = n * baseBars + numExtra;
-        if (sumDur != expected) {
-            return "A3 (dithering count): sum(dur)=" + sumDur + " but n*baseBars+numExtra=" + expected;
+
+        if (sumDurLong != planLong.totalBars) {
+            return "A3 (long exposure): sum(dur) over long trades=" + sumDurLong
+                + " but planned=" + planLong.totalBars;
+        }
+        if (sumDurShort != planShort.totalBars) {
+            return "A3 (short exposure): sum(dur) over short trades=" + sumDurShort
+                + " but planned=" + planShort.totalBars;
+        }
+
+        // A4: la permutacion conservo cuantas operaciones van en cada direccion.
+        if (countLong != planLong.count) {
+            return "A4 (direction count): long trades=" + countLong + " but expected=" + planLong.count;
+        }
+        if (countShort != planShort.count) {
+            return "A4 (direction count): short trades=" + countShort + " but expected=" + planShort.count;
         }
 
         // A2 (inicio): ningun mono empieza antes de la ventana.
@@ -1446,7 +1595,9 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
     /** Bloque 1 del volcado: de donde sale el edge y en que regimen de volatilidad. */
     private void dumpAtrStats(ResultsGroup rg, PeriodDef pd, StrategyContext ctx, int n,
                               double edgeReal, double sumAbsAtrDisp, int atrPeriod, PeriodResult res,
-                              int windowFloorHits, double exactBars, int baseBars, int numExtra,
+                              int windowFloorHits, double exactBars,
+                              DirPlan planLong, DirPlan planShort,
+                              double sumBarsLong, double sumBarsShort,
                               int idxMin, int idxMax, int m) {
         StringBuilder sb = new StringBuilder();
         sb.append("=== [").append(rg.getName()).append("] ").append(pd.label())
@@ -1468,9 +1619,26 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
         sb.append("  corr(ATR, atrDisp) over real trades = ").append(dbgFmt(res.atrEdgeCorrelation))
           .append("   (high |value| = edge concentrated in one volatility regime)\n");
         sb.append("  exactBars=").append(dbgFmt(exactBars))
-          .append(" baseBars=").append(baseBars)
-          .append(" numExtra=").append(numExtra)
-          .append(" exposureRatio=").append(dbgFmt(res.exposureRatio)).append("\n");
+          .append(" exposureRatio=").append(dbgFmt(res.exposureRatio))
+          .append("   (overall)\n");
+        // Desglose por direccion: es donde se ve si la exposicion de cada sentido se replico, y si
+        // alguno de los dos grupos saturo su duracion base a una barra.
+        sb.append("  LONG  trades=").append(planLong.count)
+          .append(" realBars=").append(dbgFmt(sumBarsLong))
+          .append(" exactBars=").append(dbgFmt(planLong.exactBars))
+          .append(" baseBars=").append(planLong.baseBars)
+          .append(" numExtra=").append(planLong.numExtra)
+          .append(" plannedBars=").append(planLong.totalBars)
+          .append(" exposureRatio=").append(dbgFmt(planLong.exposureRatio(sumBarsLong)))
+          .append(planLong.clamped ? "  [CLAMPED to 1 bar]" : "").append("\n");
+        sb.append("  SHORT trades=").append(planShort.count)
+          .append(" realBars=").append(dbgFmt(sumBarsShort))
+          .append(" exactBars=").append(dbgFmt(planShort.exactBars))
+          .append(" baseBars=").append(planShort.baseBars)
+          .append(" numExtra=").append(planShort.numExtra)
+          .append(" plannedBars=").append(planShort.totalBars)
+          .append(" exposureRatio=").append(dbgFmt(planShort.exposureRatio(sumBarsShort)))
+          .append(planShort.clamped ? "  [CLAMPED to 1 bar]" : "").append("\n");
         sb.append("  window: idxMin=").append(idxMin).append(" idxMax=").append(idxMax)
           .append(" m=").append(m);
         logDebugDump(sb.toString());
@@ -1478,15 +1646,27 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
 
     /**
      * Bloque 2 del volcado: el reparto completo del primer mono. Se vuelcan todas las operaciones y
-     * no una muestra, porque el objetivo es auditar el no-solapamiento a mano: cualquier valor
-     * negativo en la columna gapToPrev es un solapamiento.
+     * no una muestra, porque el objetivo es auditar a mano dos cosas: el no-solapamiento (cualquier
+     * valor negativo en la columna gapToPrev lo delata) y la secuencia de direcciones, que debe
+     * salir distinta en cada ejecucion pero con los mismos conteos que la estrategia real.
      */
     private void dumpMonkeyLayout(ResultsGroup rg, PeriodDef pd, int idxMin, int m,
-                                  int[] entries, int[] dur, String violation) {
+                                  int[] entries, int[] dur, int[] mkDirs, String violation) {
         int n = dur.length;
         int sumDur = 0;
-        for (int d : dur) {
-            sumDur += d;
+        int countLong = 0;
+        int countShort = 0;
+        int barsLong = 0;
+        int barsShort = 0;
+        for (int k = 0; k < n; k++) {
+            sumDur += dur[k];
+            if (mkDirs[k] > 0) {
+                countLong++;
+                barsLong += dur[k];
+            } else {
+                countShort++;
+                barsShort += dur[k];
+            }
         }
 
         StringBuilder sb = new StringBuilder();
@@ -1495,14 +1675,18 @@ public class MonkeyTest_ATR_v1_00 extends CustomAnalysisMethod {
         sb.append("  sumDur=").append(sumDur).append(" slack=").append(m - sumDur)
           .append(" firstEntry=").append(entries[0])
           .append(" lastExit=").append(entries[n - 1] + dur[n - 1]).append("\n");
+        sb.append("  directions: long=").append(countLong).append(" (").append(barsLong).append(" bars)")
+          .append("  short=").append(countShort).append(" (").append(barsShort).append(" bars)")
+          .append("   (counts and bars per direction must match the real strategy)\n");
         sb.append("  invariants: ")
-          .append(violation == null ? "A1 PASS  A2 PASS  A3 PASS" : ("FAIL -> " + violation))
+          .append(violation == null ? "A1 PASS  A2 PASS  A3 PASS  A4 PASS" : ("FAIL -> " + violation))
           .append("\n");
-        sb.append("  k\tentry\tdur\texit\tgapToPrev\n");
+        sb.append("  k\tdir\tentry\tdur\texit\tgapToPrev\n");
         for (int k = 0; k < n; k++) {
             int exit = entries[k] + dur[k];
             int gap = (k == 0) ? (entries[0] - idxMin) : (entries[k] - (entries[k - 1] + dur[k - 1]));
-            sb.append("  ").append(k).append('\t').append(entries[k]).append('\t')
+            sb.append("  ").append(k).append('\t').append(mkDirs[k] > 0 ? "L" : "S").append('\t')
+              .append(entries[k]).append('\t')
               .append(dur[k]).append('\t').append(exit).append('\t').append(gap)
               .append('\n');
         }

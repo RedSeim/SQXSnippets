@@ -1,6 +1,8 @@
-# Monkey Test ATR v1.00 - Custom Analysis Snippet
+# Monkey Test ATR v1.01 - Custom Analysis Snippet
 
 A Monte Carlo permutation test for StrategyQuant X (SQX) that measures a strategy's **geometric edge** — its ability to anticipate price displacement per unit of exposure — against randomness, without ever converting to money.
+
+> ⚠️ **v1.01 results are not comparable with v1.00 ones.** This version's monkeys shuffle their direction sequence and replicate each direction's exposure separately, so the reference distribution is different — and more demanding — than the previous version's. Percentiles and Z-Scores computed with v1.00 must be recalculated; mixing them in the same table makes no sense. The rationale for both changes is in [5.15](#515-the-direction-sequence-is-shuffled-in-every-monkey) and [5.16](#516-exposure-is-replicated-per-direction-not-just-in-total).
 
 ---
 
@@ -10,7 +12,9 @@ A Monte Carlo permutation test for StrategyQuant X (SQX) that measures a strateg
 
 The **Monkey Test** is a statistical validation method that determines whether a strategy's historical performance is a genuine edge (precise entries and exits) or simply luck: for example, having traded during a strong, sustained trend where any random entry would have made money.
 
-It simulates "monkeys" that execute the same number of trades as the original strategy, with the same average duration and the same direction, but with **entries placed at random** throughout the analysed period. If the real strategy beats a high percentile of these randomised runs, it passes the test.
+It simulates "monkeys" that execute the same number of trades as the original strategy, with the same number of trades in each direction and the same total market exposure in each of them, but with **entries placed at random** throughout the analysed period and **in random order**. If the real strategy beats a high percentile of these randomised runs, it passes the test.
+
+Put differently, the monkey is handed exactly the same "materials" the strategy had — how many times it traded in each direction and how long it was exposed in each — and is stripped of the only thing being measured: knowing *when* and *in what order* to use them.
 
 ### 1.2. The problem this test solves
 
@@ -133,7 +137,7 @@ atrDisp_i   = ((close price - open price) * direction) / ATR at entry
 edgeReal    = sum of all atrDisp_i
 ```
 
-**The monkeys' trades** — the `.dat` candles are raw prices, so the spread must be subtracted:
+**The monkeys' trades** — the `.dat` candles are raw prices, so the spread must be subtracted. Here `direction` is the one that trade drew **in that monkey's own shuffle** (see [2.8](#28-shuffles-the-direction-duration-pairs)), not that of the real trade occupying the same position:
 
 ```
 atrDisp_k   = ((exit price - entry price) * direction - spread) / ATR at entry
@@ -169,11 +173,23 @@ duration    = position(close) - position(open)
 
 By relying on the bar index, weekends and holidays do not count (indices are contiguous even when the calendar jumps), while the fractional term preserves the sub-bar resolution of the original backtest.
 
-When the resulting average duration is not a whole number of bars, **deterministic dithering** is applied: if the average is 1.5625 H4 bars (6h15m), impossible to replicate with integer durations, then with 16 trades **9 trades of 2 bars and 7 of 1 bar** are assigned, summing to exactly 25 bars = 100 hours. Rounding to 2 bars would give 32 bars (+28% over-exposure); truncating to 1 would give 16 (-36%).
+**The average is computed separately for each direction.** Long trades form one pool and short trades another, each with its own average duration. This is not a detail: averaging both together would erase the directional asymmetry of exposure and open up a false positive — see [5.16](#516-exposure-is-replicated-per-direction-not-just-in-total).
 
-The trades that receive the extra bar are chosen **at random and without repetition in each monkey**, so that long trades are spread across the whole period instead of clustering in one area. The number of long trades is always exactly the same, so total exposure is identical across all monkeys and differs from the original strategy's by **at most half a bar over the entire period**.
+When a pool's average duration is not a whole number of bars, **deterministic dithering** is applied: if the average is 1.5625 H4 bars (6h15m), impossible to replicate with integer durations, then with 16 trades **9 trades of 2 bars and 7 of 1 bar** are assigned, summing to exactly 25 bars = 100 hours. Rounding to 2 bars would give 32 bars (+28% over-exposure); truncating to 1 would give 16 (-36%).
 
-### 2.8. Places entries without overlap
+The trades that receive the extra bar are chosen **at random and without repetition in each monkey**, so that the longer-duration ones are spread across the whole period instead of clustering in one area. How many receive it is always exactly the same number, so total exposure is identical across all monkeys and differs from the original strategy's by **at most half a bar per pool over the entire period**.
+
+### 2.8. Shuffles the direction-duration pairs
+
+At this point the monkey has N trades, each with its direction and its duration. Before placing them in time, **the (direction, duration) pairs are fully shuffled in each monkey**, with a uniform random permutation.
+
+Shuffling both values **together**, as an indivisible pair, is what makes:
+
+* **The order completely random.** The sequence of longs and shorts through time differs in every monkey and bears no relation to the original strategy's.
+* **The counts preserved.** A permutation cannot change how many elements of each kind there are: the number of long and short trades is exactly the strategy's.
+* **Each direction's exposure preserved.** Since every duration travels attached to the direction of the pool that generated it, the total bars in long and the total in short remain the same however much the order changes.
+
+### 2.9. Places entries without overlap
 
 The N entries are distributed within the period window by randomly allocating the remaining slack into gaps between trades. This guarantees:
 
@@ -181,7 +197,7 @@ The N entries are distributed within the period window by randomly allocating th
 * **Everything inside the period**: the last trade ends within the evaluated window.
 * **The same number of trades** as the original strategy, always.
 
-### 2.9. Percentile-based statistical evaluation
+### 2.10. Percentile-based statistical evaluation
 
 It compares `edgeReal` against the distribution of the N monkeys. If it beats the defined percentile threshold, the strategy passes. The mean, standard deviation (n−1), Z-Score, rank percentile and median of the monkey distribution are computed.
 
@@ -195,12 +211,12 @@ It compares `edgeReal` against the distribution of the N monkeys. If it beats th
 
 1. Add a **Custom Analysis** task to your project.
 2. Under **Analysis type**, select **Per Strategy Analysis** (this enables multi-threaded computation using all available CPU cores).
-3. Select **MonkeyTest_ATR_v1_00** as the analysis method in the dropdown.
+3. Select **MonkeyTest_ATR_v1_01** as the analysis method in the dropdown.
 4. In the **Input Args** field, configure your parameters as a comma-separated string: `numMonkeys,percentile,period`, plus any optional keywords you need.
 
 #### 2. Builder Ranking and Retests tabs
 
-Since the snippet uses the `Per Strategy Analysis` signature, you can also select **MonkeyTest_ATR_v1_00** in the **Custom Analysis** filter dropdown in:
+Since the snippet uses the `Per Strategy Analysis` signature, you can also select **MonkeyTest_ATR_v1_01** in the **Custom Analysis** filter dropdown in:
 
 * The **Ranking** tab of the Builder/Genetic configuration (to discard strategies automatically during generation).
 * The **Retests** configuration (to discard strategies after retesting them on new data).
@@ -319,24 +335,29 @@ This matters because SQX has **two independent mechanisms** that can exclude a s
 
 ### Layout invariants (always on)
 
-Three invariants on the entry layout are checked for every monkey. **There is nothing to enable**: they always run, silently, and only emit a `WARN` in the SQX log if one is violated.
+Four invariants on the entry layout are checked for every monkey. **There is nothing to enable**: they always run, silently, and only emit a `WARN` in the SQX log if one is violated.
 
 | Invariant | What it guarantees |
 | :--- | :--- |
 | **A1** | Zero overlap: `entry[k] ≥ entry[k-1] + duration[k-1]` |
 | **A2** | Everything inside the window: the first entry does not fall before `idxMin` and the last exit does not pass `idxMax` |
-| **A3** | The dithering distributed exactly the planned bars: `Σduration == n·baseBars + numExtra` |
+| **A3** | The dithering distributed exactly the planned bars **in each direction**: the sum of durations over the long trades matches what was planned for longs, and likewise for shorts |
+| **A4** | The permutation preserved **how many** trades go in each direction |
 
-A `WARN` from A1, A2 or A3 is **always a bug in the layout algorithm, never a market condition or an odd piece of data**. If one appears, that period's results are not trustworthy. Only the first violation per period is reported so as not to flood the log.
+**A3 and A4 are the ones watching that the shuffle breaks nothing**: A4 checks that there are still the same number of trades in each direction, and A3 that each direction still occupies the same market bars. Being checked per direction, A3 subsumes the global check: if both pools match, so does the total.
+
+A `WARN` from A1 through A4 is **always a bug in the layout algorithm, never a market condition or an odd piece of data**. If one appears, that period's results are not trustworthy. Only the first violation per period is reported so as not to flood the log.
 
 They run on every monkey and not only with `Debug` enabled, deliberately: if they were only checked in diagnostic mode, a violation in production would go unnoticed — which is exactly the scenario worth detecting.
 
 ### Diagnostic dump (`Debug`)
 
-With the `Debug` keyword, `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_ATR_v1_debug.log` is written, in two blocks per period:
+With the `Debug` keyword, `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_ATR_v1_01_debug.log` is written, in two blocks per period:
 
 1. **`ATR STATS`** — where the edge comes from and in what volatility regime: number of trades, total and per-trade edge, sum of absolute values, minimum/median/maximum ATR at the entries, **how many entries hit the one-tick floor** (non-zero means padded or corrupt candles), the spread applied, and the **correlation between the entry ATR and the normalised displacement** over the real trades. That correlation is diagnostic: a high absolute value warns that the edge is concentrated in a specific volatility regime, which is exactly the case where extrapolating to phase 2 is least reliable.
-2. **`LAYOUT (monkey #0)`** — the complete layout of the first monkey, one row per trade with `k`, entry, duration, exit and **`gapToPrev`**. All trades are dumped rather than a sample, because the point is to audit the non-overlap by hand: **any negative `gapToPrev` is an overlap**. The header also states whether A1/A2/A3 passed.
+
+   It also includes **a `LONG` line and a `SHORT` line** with each direction's breakdown: how many trades it has, how many bars it actually occupied, its average and base duration, and its own `exposureRatio`. That ratio must come out very close to `1.0000` in both: it is the check that each direction's exposure was replicated. If a direction is flagged `[CLAMPED to 1 bar]`, its average duration fell below one bar and its exposure is inflated — the cue to consider `Precision=M1`.
+2. **`LAYOUT (monkey #0)`** — the complete layout of the first monkey, one row per trade with `k`, **`dir`** (`L`/`S`), entry, duration, exit and **`gapToPrev`**. All trades are dumped rather than a sample, because the point is to audit two things by hand: the non-overlap (**any negative `gapToPrev` gives it away**) and the direction sequence, which must come out different on every run. The header summarises the counts and bars of each direction — which must match the real strategy's — and states whether A1 through A4 passed.
 
 The dump goes to its own file rather than the SQX log because the latter reaches hundreds of MB per day and would become unusable. The writer is synchronised, since `Per Strategy Analysis` runs multi-threaded; each line carries the thread name, which is the same identifier that appears in the SQX log and lets you correlate the two.
 
@@ -438,23 +459,43 @@ Furthermore, measuring in bars makes the weekend disappear from the computation:
 
 ### 5.13. The dithering uses a random permutation with a fixed count
 
-The extra bars are distributed at random among different trades in each monkey, instead of always falling on the first ones. Since trades run in chronological order, assigning them by index would invariably cluster the long trades at the start of the period, and identically across all monkeys.
+The extra bars are distributed at random among different trades in each monkey, instead of always falling on the first ones in the list. Assigning them by index would invariably cluster the longer-duration trades in the same area, and identically across all monkeys.
 
-**It must not be replaced by an independent probability per trade.** It looks more random, but the number of long trades would then follow a binomial distribution and total time exposure would vary from one monkey to another, losing the property that makes them comparable to each other and to the strategy.
+**It must not be replaced by an independent probability per trade.** It looks more random, but how many trades receive the extra bar would then follow a binomial distribution and total time exposure would vary from one monkey to another, losing the property that makes them comparable to each other and to the strategy.
+
+> **Terminology note**: throughout this documentation "long" and "short" **always refer to the direction** of the trade. To talk about how much time it lasts the word is "duration" — never "long trade", which would be ambiguous.
 
 ### 5.14. The separation between entries is each trade's real duration
 
 This is what mathematically guarantees the N trades fit within the period. If the original strategy does not overlap trades, the sum of their durations is less than the period length — but that guarantee is only inherited if the minimum separation is not rounded up uniformly.
 
+### 5.15. The direction sequence is shuffled in every monkey
+
+A monkey could be built preserving the order in which the strategy alternated longs and shorts, randomising only *when* each trade happens. **That is not what is done, and the difference matters.**
+
+If the order were preserved, all 500 monkeys would share exactly the same directional sequence — always "long, long, short, long…" — differing only in the spacing. That makes them **non-independent** draws in the directional dimension: a real source of variation is frozen, the null distribution comes out artificially narrow, and both the percentile and the Z-Score turn out more lenient than they should be.
+
+Shuffling the sequence in every monkey returns that variation to the experiment. The cost is nil (a permutation is O(n)) and what is gained is that the reference distribution genuinely represents "what would have happened with no skill at all", rather than "what would have happened while preserving the strategy's alternation pattern".
+
+### 5.16. Exposure is replicated per direction, not just in total
+
+The average duration is computed **separately** for long trades and for short ones, and each pool feeds only the trades of its own direction. Averaging them together would be simpler, but it opens up a serious false positive.
+
+Consider a strategy with 50 long trades of 5 bars (250 bars) and 50 short trades of 20 bars (1,000 bars), over a market that fell during the period. With a global average of 12.5 bars, each monkey would end up with 625 bars of exposure in each direction. The real strategy captures the downward drift over 1,000 bars of short exposure; the monkeys, only over 625. The strategy comes out with "edge" when in reality it **was merely short for longer while the market fell**.
+
+That is exactly the kind of market-regime-dependent advantage — not timing-dependent — that the Monkey Test declares it exists to detect. By replicating each direction's exposure separately, the monkey inherits the same directional asymmetry the strategy had, and the comparison goes back to isolating the only thing meant to be measured.
+
+> A side effect worth knowing: by separating the pools, a direction with very brief trades can clamp its base duration to one bar and inflate its exposure, even when the global average would not have. The `Debug` dump flags it as `[CLAMPED to 1 bar]` on that direction's line.
+
 ---
 
 ## 6. Relationship with the companion monetary test
 
-This project includes a second Monkey Test, `MonkeyTest_v2_00`, which answers a different question: **how much money would this strategy have made against randomness, with the money management it actually has?** It shares all the simulation machinery with this one — duration, dithering, non-overlapping entry placement — and differs only in the magnitude it measures.
+This project includes a second Monkey Test, `MonkeyTest_v2_00`, which answers a different question: **how much money would this strategy have made against randomness, with the money management it actually has?** It shares much of the simulation machinery with this one — duration measurement, dithering, non-overlapping entry placement — although, besides measuring in money, it builds its monkeys more conservatively: it averages duration without separating by direction, and it preserves the strategy's directional sequence instead of shuffling it.
 
 The two coexist and are complementary: this one for phase 1 (pure rules, where the lot size is a technical artifact), the monetary one for validating complete strategies once they have their real risk management.
 
-| Aspect | Monetary test (`MonkeyTest_v2_00`) | This test (`MonkeyTest_ATR_v1_00`) |
+| Aspect | Monetary test (`MonkeyTest_v2_00`) | This test (`MonkeyTest_ATR_v1_01`) |
 | :--- | :--- | :--- |
 | Magnitude measured | Profit in money | ATR-normalized displacement (dimensionless) |
 | Money management handling | Two different formulas, depending on whether the lot is fixed or variable | Just one: the money management plays no part |
@@ -467,4 +508,6 @@ The two coexist and are complementary: this one for phase 1 (pure rules, where t
 | `ATRPeriod` | Not applicable | Configurable, 14 by default |
 | Percentile and Z-Score columns | Shared | Shared (the ATR key takes precedence) |
 | Magnitude columns | `MonkeyMedianProfit` (euros) | `Monkey ATR Normalized Pips Profit` and `Monkey ATR Edge Per Trade` |
-| Duration, dithering, layout, invariants | Identical | Identical |
+| Monkey durations | One global average for all trades | One average per direction, replicating each direction's exposure |
+| Monkey direction sequence | The strategy's is preserved | Randomly shuffled in every monkey |
+| Overlap-free layout and A1/A2 invariants | Identical | Identical (plus A3 per direction and A4) |

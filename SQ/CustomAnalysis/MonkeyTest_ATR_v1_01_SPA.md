@@ -1,6 +1,8 @@
-# Monkey Test ATR v1.00 - Snippet de Custom Analysis
+# Monkey Test ATR v1.01 - Snippet de Custom Analysis
 
 Un test de Permutación Monte Carlo para StrategyQuant X (SQX) que mide el **edge geométrico** de una estrategia — su capacidad de anticipar desplazamiento de precio por unidad de exposición — comparándolo contra el azar, sin convertir nunca a dinero.
+
+> ⚠️ **Los resultados de la v1.01 no son comparables con los de la v1.00.** Los monos de esta versión barajan su secuencia de direcciones y replican la exposición de cada sentido por separado, así que la distribución de referencia es distinta —y más exigente— que la de la versión anterior. Percentiles y Z-Scores calculados con v1.00 deben recalcularse; no tiene sentido mezclarlos en la misma tabla. El motivo de ambos cambios está en [5.15](#515-la-secuencia-de-direcciones-se-baraja-en-cada-mono) y [5.16](#516-la-exposición-se-replica-por-dirección-no-sólo-en-total).
 
 ---
 
@@ -10,7 +12,9 @@ Un test de Permutación Monte Carlo para StrategyQuant X (SQX) que mide el **edg
 
 El **Monkey Test** es un método de validación estadística que determina si el rendimiento histórico de una estrategia es una ventaja genuina (entradas y salidas precisas) o simplemente suerte: por ejemplo, haber operado durante una tendencia fuerte y prolongada donde cualquier entrada aleatoria habría ganado dinero.
 
-Simula "monos" que ejecutan el mismo número de operaciones que la estrategia original, con la misma duración media y la misma dirección, pero con **entradas colocadas al azar** a lo largo del periodo analizado. Si la estrategia real supera a un percentil alto de estas ejecuciones aleatorizadas, pasa el test.
+Simula "monos" que ejecutan el mismo número de operaciones que la estrategia original, con el mismo número de operaciones en cada dirección y la misma exposición total al mercado en cada una de ellas, pero con **entradas colocadas al azar** a lo largo del periodo analizado y **en orden aleatorio**. Si la estrategia real supera a un percentil alto de estas ejecuciones aleatorizadas, pasa el test.
+
+Dicho de otro modo, al mono se le entregan exactamente los mismos "materiales" que tuvo la estrategia —cuántas veces operó en cada sentido y cuánto tiempo estuvo expuesto en cada uno— y se le quita lo único que se quiere medir: saber *cuándo* y *en qué orden* usarlos.
 
 ### 1.2. El problema que este test resuelve
 
@@ -133,7 +137,7 @@ atrDisp_i   = ((precio de cierre - precio de apertura) * dirección) / ATR en la
 edgeReal    = suma de todos los atrDisp_i
 ```
 
-**Operaciones de los monos** — las velas del `.dat` son precios crudos, así que hay que restar el spread:
+**Operaciones de los monos** — las velas del `.dat` son precios crudos, así que hay que restar el spread. Aquí `dirección` es la que le tocó a esa operación **en el sorteo de ese mono** (ver [2.8](#28-baraja-los-pares-dirección-duración)), no la de la operación real que ocupa esa posición:
 
 ```
 atrDisp_k   = ((precio de salida - precio de entrada) * dirección - spread) / ATR en la entrada
@@ -169,11 +173,23 @@ duración    = posición(cierre) - posición(apertura)
 
 Al apoyarse en el índice de barra, los fines de semana y festivos no cuentan (los índices son contiguos aunque el calendario salte), mientras que el término fraccionario conserva la resolución sub-barra del backtest original.
 
-Cuando la duración media resultante no es un número entero de barras, se aplica el **dithering determinista**: si la media es de 1,5625 barras H4 (6h15m), imposible de replicar con duraciones enteras, con 16 operaciones se asignan **9 operaciones de 2 barras y 7 de 1 barra**, lo que suma exactamente 25 barras = 100 horas. Redondear a 2 barras daría 32 barras (+28% de sobreexposición); truncar a 1 daría 16 (-36%).
+**La media se calcula por separado para cada dirección.** Las operaciones en largo forman una bolsa y las que van en corto otra, cada una con su propia duración media. No es un detalle: promediar ambas juntas borraría la asimetría direccional de la exposición y abriría un falso positivo — ver [5.16](#516-la-exposición-se-replica-por-dirección-no-sólo-en-total).
 
-Las operaciones que reciben la barra extra se eligen **al azar y sin repetición en cada mono**, de modo que las operaciones largas quedan repartidas por todo el periodo en lugar de concentrarse en una zona. El número de operaciones largas es siempre exactamente el mismo, así que la exposición total es idéntica en todos los monos y difiere de la de la estrategia original en **como máximo media barra sobre el periodo completo**.
+Cuando la duración media de una bolsa no es un número entero de barras, se aplica el **dithering determinista**: si la media es de 1,5625 barras H4 (6h15m), imposible de replicar con duraciones enteras, con 16 operaciones se asignan **9 operaciones de 2 barras y 7 de 1 barra**, lo que suma exactamente 25 barras = 100 horas. Redondear a 2 barras daría 32 barras (+28% de sobreexposición); truncar a 1 daría 16 (-36%).
 
-### 2.8. Coloca las entradas sin solapamiento
+Las operaciones que reciben la barra extra se eligen **al azar y sin repetición en cada mono**, de modo que las de mayor duración quedan repartidas por todo el periodo en lugar de concentrarse en una zona. Cuántas la reciben es siempre exactamente el mismo número, así que la exposición total es idéntica en todos los monos y difiere de la de la estrategia original en **como máximo media barra por bolsa sobre el periodo completo**.
+
+### 2.8. Baraja los pares dirección-duración
+
+Llegado este punto el mono tiene N operaciones, cada una con su dirección y su duración. Antes de colocarlas en el tiempo, **los pares (dirección, duración) se barajan al completo en cada mono**, con una permutación aleatoria uniforme.
+
+Barajar los dos valores **juntos**, como una pareja indivisible, es lo que hace que:
+
+* **El orden sea completamente aleatorio.** La secuencia de largos y cortos a lo largo del tiempo es distinta en cada mono y no guarda relación con la de la estrategia original.
+* **Los conteos se conserven.** Una permutación no puede cambiar cuántos elementos de cada tipo hay: el número de operaciones en largo y en corto es exactamente el de la estrategia.
+* **La exposición de cada dirección se conserve.** Como cada duración viaja pegada a la dirección de la bolsa que la generó, el total de barras en largo y el total en corto siguen siendo los mismos por mucho que cambie el orden.
+
+### 2.9. Coloca las entradas sin solapamiento
 
 Las N entradas se distribuyen dentro de la ventana del periodo repartiendo al azar la holgura sobrante en huecos entre operaciones. Esto garantiza:
 
@@ -181,7 +197,7 @@ Las N entradas se distribuyen dentro de la ventana del periodo repartiendo al az
 * **Todo dentro del periodo**: la última operación termina dentro de la ventana evaluada.
 * **Mismo número de operaciones** que la estrategia original, siempre.
 
-### 2.9. Evaluación estadística por percentil
+### 2.10. Evaluación estadística por percentil
 
 Compara `edgeReal` frente a la distribución de los N monos. Si supera el umbral de percentil definido, la estrategia pasa. Se calculan la media, la desviación típica (n−1), el Z-Score, el percentil de rango y la mediana de la distribución de los monos.
 
@@ -195,12 +211,12 @@ Compara `edgeReal` frente a la distribución de los N monos. Si supera el umbral
 
 1. Añade una tarea de **Custom Analysis** a tu proyecto.
 2. En **Analysis type**, selecciona **Per Strategy Analysis** (esto habilita el cómputo multihilo usando todos los núcleos de CPU disponibles).
-3. Selecciona **MonkeyTest_ATR_v1_00** como método de análisis en el desplegable.
+3. Selecciona **MonkeyTest_ATR_v1_01** como método de análisis en el desplegable.
 4. En el campo **Input Args**, configura tus parámetros como una cadena separada por comas: `numMonkeys,percentile,period`, más las palabras clave opcionales que necesites.
 
 #### 2. Pestañas de Ranking y Retests del Builder
 
-Como el snippet usa la firma `Per Strategy Analysis`, también puedes seleccionar **MonkeyTest_ATR_v1_00** en el desplegable de filtro de **Custom Analysis** en:
+Como el snippet usa la firma `Per Strategy Analysis`, también puedes seleccionar **MonkeyTest_ATR_v1_01** en el desplegable de filtro de **Custom Analysis** en:
 
 * La pestaña **Ranking** de la configuración de Builder/Genético (para descartar estrategias automáticamente durante la generación).
 * La configuración de **Retests** (para descartar estrategias tras retestearlas sobre datos nuevos).
@@ -319,24 +335,29 @@ Esto importa porque SQX tiene **dos mecanismos independientes** que pueden exclu
 
 ### Invariantes del layout (siempre activas)
 
-En cada mono se comprueban tres invariantes sobre el reparto de las entradas. **No hay que activarlas**: corren siempre, calladas, y sólo emiten un `WARN` en el log de SQX si alguna se viola.
+En cada mono se comprueban cuatro invariantes sobre el reparto de las entradas. **No hay que activarlas**: corren siempre, calladas, y sólo emiten un `WARN` en el log de SQX si alguna se viola.
 
 | Invariante | Qué garantiza |
 | :--- | :--- |
 | **A1** | Cero solapamiento: `entrada[k] ≥ entrada[k-1] + duración[k-1]` |
 | **A2** | Todo dentro de la ventana: la primera entrada no cae antes de `idxMin` y la última salida no pasa de `idxMax` |
-| **A3** | El dithering repartió exactamente las barras planificadas: `Σduración == n·baseBars + numExtra` |
+| **A3** | El dithering repartió exactamente las barras planificadas **en cada dirección**: la suma de duraciones de las operaciones en largo coincide con lo planificado para los largos, e igual para los cortos |
+| **A4** | La permutación conservó **cuántas** operaciones van en cada dirección |
 
-Un `WARN` de A1, A2 o A3 **siempre es un bug del algoritmo de layout, nunca una condición de mercado ni un dato raro**. Si aparece, los resultados de ese periodo no son fiables. Se reporta sólo la primera violación de cada periodo para no inundar el log.
+**A3 y A4 son las que vigilan que el barajado no rompa nada**: A4 comprueba que sigue habiendo el mismo número de operaciones en cada sentido, y A3 que cada sentido sigue ocupando las mismas barras de mercado. Al comprobarse por dirección, A3 subsume la verificación global: si ambas bolsas cuadran, el total también.
+
+Un `WARN` de A1 a A4 **siempre es un bug del algoritmo de layout, nunca una condición de mercado ni un dato raro**. Si aparece, los resultados de ese periodo no son fiables. Se reporta sólo la primera violación de cada periodo para no inundar el log.
 
 Corren en todos los monos y no sólo con `Debug` activo a propósito: si sólo se comprobasen en modo diagnóstico, una violación en producción pasaría desapercibida, que es justo el escenario que interesa detectar.
 
 ### Volcado de diagnóstico (`Debug`)
 
-Con la palabra clave `Debug` se escribe `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_ATR_v1_debug.log`, en dos bloques por periodo:
+Con la palabra clave `Debug` se escribe `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_ATR_v1_01_debug.log`, en dos bloques por periodo:
 
 1. **`ATR STATS`** — de dónde sale el edge y en qué régimen de volatilidad: número de operaciones, edge total y por operación, suma de valores absolutos, ATR mínimo/mediano/máximo en las entradas, **cuántas entradas tocaron el suelo de un tick** (distinto de cero significa velas rellenadas o corruptas), spread aplicado, y la **correlación entre el ATR de entrada y el desplazamiento normalizado** sobre las operaciones reales. Esa correlación es diagnóstica: un valor alto en valor absoluto avisa de que el edge se concentra en un régimen de volatilidad concreto, que es justo el caso en que extrapolar a la fase 2 es menos fiable.
-2. **`LAYOUT (monkey #0)`** — el reparto completo del primer mono, una fila por operación con `k`, entrada, duración, salida y **`gapToPrev`**. Se vuelcan todas las operaciones y no una muestra, porque el objetivo es auditar el no-solapamiento a mano: **cualquier `gapToPrev` negativo es un solapamiento**. La cabecera indica además si A1/A2/A3 pasaron.
+
+   Incluye además **una línea `LONG` y otra `SHORT`** con el desglose de cada dirección: cuántas operaciones tiene, cuántas barras ocupaba realmente, la duración media y base, y su `exposureRatio` propio. Ese ratio debe salir muy cerca de `1.0000` en ambas: es la comprobación de que la exposición de cada sentido se replicó. Si una dirección aparece marcada como `[CLAMPED to 1 bar]`, su duración media caía por debajo de una barra y su exposición está inflada — la señal para plantearse `Precision=M1`.
+2. **`LAYOUT (monkey #0)`** — el reparto completo del primer mono, una fila por operación con `k`, **`dir`** (`L`/`S`), entrada, duración, salida y **`gapToPrev`**. Se vuelcan todas las operaciones y no una muestra, porque el objetivo es auditar a mano dos cosas: el no-solapamiento (**cualquier `gapToPrev` negativo lo delata**) y la secuencia de direcciones, que debe salir distinta en cada ejecución. La cabecera resume los conteos y las barras de cada dirección —que deben coincidir con los de la estrategia real— e indica si A1 a A4 pasaron.
 
 El volcado va a un fichero propio y no al log de SQX porque éste llega a cientos de MB al día y quedaría inservible. El escritor está sincronizado, ya que `Per Strategy Analysis` corre multihilo; cada línea lleva el nombre del hilo, que es el mismo identificador que aparece en el log de SQX y permite correlacionar ambos.
 
@@ -438,23 +459,43 @@ Además, al medir en barras el fin de semana desaparece del cómputo: una operac
 
 ### 5.13. El dithering usa una permutación aleatoria con conteo fijo
 
-Las barras extra se reparten al azar entre operaciones distintas en cada mono, en lugar de recaer siempre sobre las primeras. Como las operaciones van en orden cronológico, asignarlas por índice concentraría invariablemente las operaciones largas al inicio del periodo, y de forma idéntica en todos los monos.
+Las barras extra se reparten al azar entre operaciones distintas en cada mono, en lugar de recaer siempre sobre las primeras de la lista. Asignarlas por índice concentraría invariablemente las operaciones de mayor duración en la misma zona, y de forma idéntica en todos los monos.
 
-**No debe sustituirse por una probabilidad independiente por operación.** Parece más aleatorio, pero el número de operaciones largas pasaría a seguir una distribución binomial y la exposición temporal total variaría de un mono a otro, perdiendo la propiedad que los hace comparables entre sí y con la estrategia.
+**No debe sustituirse por una probabilidad independiente por operación.** Parece más aleatorio, pero cuántas operaciones reciben la barra extra pasaría a seguir una distribución binomial y la exposición temporal total variaría de un mono a otro, perdiendo la propiedad que los hace comparables entre sí y con la estrategia.
+
+> **Nota de terminología**: en toda esta documentación "largo" y "corto" se refieren **siempre a la dirección** de la operación. Para hablar de cuánto dura se dice "duración" — nunca "operación larga", que sería ambiguo.
 
 ### 5.14. La separación entre entradas es la duración real de cada operación
 
 Es lo que garantiza matemáticamente que las N operaciones quepan en el periodo. Si la estrategia original no solapa operaciones, se cumple que la suma de sus duraciones es menor que la longitud del periodo — pero esa garantía sólo se hereda si la separación mínima no se redondea al alza de forma uniforme.
 
+### 5.15. La secuencia de direcciones se baraja en cada mono
+
+Un mono podría construirse conservando el orden en que la estrategia alternó largos y cortos, y aleatorizando sólo *cuándo* ocurre cada operación. **No se hace así, y la diferencia importa.**
+
+Si el orden se conservara, los 500 monos compartirían exactamente la misma secuencia direccional —siempre "largo, largo, corto, largo…"— y sólo se diferenciarían en el espaciado. Eso los convierte en sorteos **no independientes** en la dimensión direccional: una fuente real de variación queda congelada, la distribución nula sale artificialmente estrecha, y tanto el percentil como el Z-Score resultan más benévolos de lo que deberían.
+
+Barajar la secuencia en cada mono devuelve esa variación al experimento. El coste es nulo (una permutación es O(n)) y lo que se gana es que la distribución de referencia represente de verdad "lo que habría pasado sin ninguna habilidad", en vez de "lo que habría pasado conservando el patrón de alternancia de la estrategia".
+
+### 5.16. La exposición se replica por dirección, no sólo en total
+
+La duración media se calcula **por separado** para las operaciones en largo y para las que van en corto, y cada bolsa alimenta sólo a las operaciones de su sentido. Promediarlas juntas sería más simple, pero abre un falso positivo grave.
+
+Considera una estrategia con 50 operaciones en largo de 5 barras (250 barras) y 50 en corto de 20 barras (1.000 barras), sobre un mercado que cayó durante el periodo. Con una media global de 12,5 barras, cada mono acabaría con 625 barras de exposición en cada sentido. La estrategia real capta la deriva bajista durante 1.000 barras de exposición corta; los monos, sólo durante 625. La estrategia sale con "edge" cuando en realidad **sólo estuvo corta más tiempo mientras el mercado caía**.
+
+Eso es exactamente el tipo de ventaja dependiente del régimen de mercado —no del timing— que el Monkey Test declara existir para detectar. Replicando la exposición de cada dirección por separado, el mono hereda la misma asimetría direccional que tuvo la estrategia, y la comparación vuelve a aislar lo único que se quiere medir.
+
+> Un efecto secundario que conviene conocer: al separar las bolsas, una dirección con operaciones muy breves puede saturar su duración base a una barra e inflar su exposición, aunque la media global no lo hiciera. El volcado `Debug` lo marca como `[CLAMPED to 1 bar]` en la línea de esa dirección.
+
 ---
 
 ## 6. Relación con el test monetario complementario
 
-Este proyecto incluye un segundo Monkey Test, `MonkeyTest_v2_00`, que responde a una pregunta distinta: **¿cuánto dinero habría ganado esta estrategia frente al azar, con el money management que realmente tiene?** Comparte con éste toda la maquinaria de simulación —duración, dithering, colocación de entradas sin solapamiento— y sólo difiere en la magnitud que mide.
+Este proyecto incluye un segundo Monkey Test, `MonkeyTest_v2_00`, que responde a una pregunta distinta: **¿cuánto dinero habría ganado esta estrategia frente al azar, con el money management que realmente tiene?** Comparte con éste buena parte de la maquinaria de simulación —medición de duración, dithering, colocación de entradas sin solapamiento— aunque, además de medir en dinero, construye sus monos de forma más conservadora: promedia la duración sin separar por dirección y conserva la secuencia direccional de la estrategia, en vez de barajarla.
 
 Los dos conviven y son complementarios: éste para la fase 1 (reglas puras, donde el lotaje es un artefacto técnico), el monetario para validar estrategias completas una vez tienen su gestión de riesgo real.
 
-| Aspecto | Test monetario (`MonkeyTest_v2_00`) | Este test (`MonkeyTest_ATR_v1_00`) |
+| Aspecto | Test monetario (`MonkeyTest_v2_00`) | Este test (`MonkeyTest_ATR_v1_01`) |
 | :--- | :--- | :--- |
 | Magnitud medida | Beneficio en dinero | Desplazamiento normalizado por ATR (adimensional) |
 | Tratamiento del money management | Dos fórmulas distintas, según el lotaje sea fijo o variable | Una sola: el money management no interviene |
@@ -467,4 +508,6 @@ Los dos conviven y son complementarios: éste para la fase 1 (reglas puras, dond
 | `ATRPeriod` | No aplica | Configurable, 14 por defecto |
 | Columnas de percentil y Z-Score | Compartidas | Compartidas (la clave ATR tiene precedencia) |
 | Columnas de magnitud | `MonkeyMedianProfit` (euros) | `Monkey ATR Normalized Pips Profit` y `Monkey ATR Edge Per Trade` |
-| Duración, dithering, layout, invariantes | Idénticos | Idénticos |
+| Duración de los monos | Una media global para todas las operaciones | Una media por dirección, que replica la exposición de cada sentido |
+| Secuencia de direcciones de los monos | Se conserva la de la estrategia | Se baraja al azar en cada mono |
+| Layout sin solapamiento e invariantes A1/A2 | Idénticos | Idénticos (más A3 por dirección y A4) |

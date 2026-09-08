@@ -7,7 +7,7 @@ import com.strategyquant.tradinglib.ValueTypes;
 
 /**
  * Suma de los desplazamientos de precio de todas las operaciones, cada uno normalizado por el ATR
- * vigente en su entrada. Es la magnitud EXACTA sobre la que MonkeyTest_ATR_v1_00 emite su veredicto:
+ * vigente en su entrada. Es la magnitud EXACTA sobre la que MonkeyTest_ATR_v1_01 emite su veredicto:
  * el percentil y el Z-Score salen de comparar este valor contra el de los N monos.
  *
  * No es dinero. Un valor de 12,50 significa que la estrategia capturo, en total, 12,5 veces la

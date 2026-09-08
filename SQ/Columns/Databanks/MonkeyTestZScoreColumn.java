@@ -46,7 +46,7 @@ public class MonkeyTestZScoreColumn extends DatabankColumn {
      * otro periodo. La única excepción es Full Sample, que acepta la clave legacy sin sufijo
      * escrita por versiones anteriores del Custom Analysis.
      *
-     * La columna sirve a los DOS tests: MonkeyTest_ATR_v1_00 (edge geométrico) y MonkeyTest_v2_00
+     * La columna sirve a los DOS tests: MonkeyTest_ATR_v1_01 (edge geométrico) y MonkeyTest_v2_00
      * (edge monetario). El Z-Score significa lo mismo en ambos — desviaciones típicas por encima de
      * la media de los monos —, sólo cambia la magnitud subyacente que se comparó.
      *

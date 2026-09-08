@@ -33,7 +33,7 @@ public class MonkeyTestColumn extends DatabankColumn {
      * mismo número. La única excepción es Full Sample, que acepta las claves legacy sin sufijo
      * escritas por versiones anteriores del Custom Analysis.
      *
-     * La columna sirve a los DOS tests: MonkeyTest_ATR_v1_00 (edge geométrico) y MonkeyTest_v2_00
+     * La columna sirve a los DOS tests: MonkeyTest_ATR_v1_01 (edge geométrico) y MonkeyTest_v2_00
      * (edge monetario). El percentil significa exactamente lo mismo en ambos — posición frente a la
      * distribución de los monos —, así que no tiene sentido duplicar la columna.
      *

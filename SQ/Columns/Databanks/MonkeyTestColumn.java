@@ -13,7 +13,7 @@ public class MonkeyTestColumn extends DatabankColumn {
               ValueTypes.Minimize,
               0, 0, 0);
         setWidth(100);
-        setTooltip("Monkey Test result for the sample period selected in the Databank: percentile score achieved (e.g. 85.20%) or failure status (LOW TRADES, ERROR, etc.)");
+        setTooltip("Monkey Test result for the sample period selected in the Databank: percentile score achieved (e.g. 85.20%) or failure status (LOW TRADES, ERROR, etc.). Serves both the ATR Monkey Test (geometric edge) and the v2 Monkey Test (monetary edge); when both have been run, the ATR result takes precedence.");
     }
 
     @Override
@@ -32,9 +32,26 @@ public class MonkeyTestColumn extends DatabankColumn {
      * periodo — precisamente ese fallback era lo que hacía que todas las columnas mostrasen el
      * mismo número. La única excepción es Full Sample, que acepta las claves legacy sin sufijo
      * escritas por versiones anteriores del Custom Analysis.
+     *
+     * La columna sirve a los DOS tests: MonkeyTest_ATR_v1_00 (edge geométrico) y MonkeyTest_v2_00
+     * (edge monetario). El percentil significa exactamente lo mismo en ambos — posición frente a la
+     * distribución de los monos —, así que no tiene sentido duplicar la columna.
+     *
+     * **Precedencia: la clave del test ATR manda.** Ninguno de los dos tests limpia las claves del
+     * otro, así que un databank puede arrastrar claves MonkeyTest* de una ejecución antigua; con la
+     * precedencia inversa, un resultado ATR recién calculado quedaría oculto tras uno rancio.
      */
     private String resolve(ResultsGroup results, byte sampleType) {
         String suffix = getSuffix(sampleType);
+
+        String atrPct = readString(results, "MonkeyATRPercentile" + suffix);
+        if (atrPct != null && !"N/A".equals(atrPct)) {
+            return atrPct;
+        }
+        String atrStatus = readString(results, "MonkeyATRResult" + suffix);
+        if (atrStatus != null) {
+            return atrStatus;
+        }
 
         String pct = readString(results, "MonkeyTestPercentile" + suffix);
         if (pct != null && !"N/A".equals(pct)) {

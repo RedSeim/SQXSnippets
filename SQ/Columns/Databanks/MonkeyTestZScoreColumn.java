@@ -13,7 +13,7 @@ public class MonkeyTestZScoreColumn extends DatabankColumn {
               ValueTypes.Maximize,
               0, -10, 10);
         setWidth(80);
-        setTooltip("Monkey Test Z-Score for the sample period selected in the Databank: number of standard deviations the strategy profit is above the average monkey profit.");
+        setTooltip("Monkey Test Z-Score for the sample period selected in the Databank: standard deviations the strategy is above the average monkey. Serves both the ATR Monkey Test (geometric edge) and the v2 Monkey Test (monetary edge); when both have been run, the ATR result takes precedence.");
     }
 
     @Override
@@ -45,8 +45,21 @@ public class MonkeyTestZScoreColumn extends DatabankColumn {
      * periodo no se ha calculado se devuelve null (columna en N/A) en lugar de caer al valor de
      * otro periodo. La única excepción es Full Sample, que acepta la clave legacy sin sufijo
      * escrita por versiones anteriores del Custom Analysis.
+     *
+     * La columna sirve a los DOS tests: MonkeyTest_ATR_v1_00 (edge geométrico) y MonkeyTest_v2_00
+     * (edge monetario). El Z-Score significa lo mismo en ambos — desviaciones típicas por encima de
+     * la media de los monos —, sólo cambia la magnitud subyacente que se comparó.
+     *
+     * **Precedencia: la clave del test ATR manda**, por la misma razón que en MonkeyTestColumn: un
+     * databank puede arrastrar claves MonkeyTest* de una ejecución antigua, y con la precedencia
+     * inversa ocultarían un resultado ATR recién calculado.
      */
     private String resolve(ResultsGroup results, byte sampleType) {
+        String atr = readString(results, "MonkeyATRZScore" + getSuffix(sampleType));
+        if (atr != null && !"N/A".equals(atr)) {
+            return atr;
+        }
+
         String v = readString(results, "MonkeyTestZScore" + getSuffix(sampleType));
         if (v != null) {
             return v;

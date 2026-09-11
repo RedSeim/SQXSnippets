@@ -1,10 +1,10 @@
-# MonkeyTest_ATR v1.01 — Verification Checklist
+# MonkeyTest_ATR v1.02 — Verification Checklist
 
 Estado de las verificaciones del snippet. Lo marcado como **hecho** ya se ejecutó y pasó; lo
 marcado como **pendiente** requiere lanzar SQX.
 
 > Las verificaciones que dependen de comparar contra ejecuciones anteriores deben tener en cuenta
-> que **los resultados de v1.01 no son comparables con los de v1.00**: los monos cambiaron
+> que **los resultados de v1.02 no son comparables con los de v1.00**: los monos cambiaron
 > (barajan direcciones y replican la exposición por dirección), así que percentiles y Z-Scores
 > serán distintos por diseño.
 
@@ -33,6 +33,17 @@ largos, sólo cortos, `n=1`, `n=2`, `n=0`):
 - las barras totales de cada dirección coinciden exactamente con lo planificado;
 - el barajado es uniforme (desviación relativa máxima por posición < 7%, umbral 10%).
 
+### ✅ Tabla de decisión del alias OOS ≡ OOS1
+
+Test aislado sobre los 13 casos de la decisión, con las constantes reales de `SampleTypes`:
+
+- **se activa** con segmento único, en ambos sentidos (`OOS`→`_OOS1`, `OOS1`→`_OOS`), tanto si la
+  única parte numerada poblada es la 1 como si no hay ninguna y sólo existe el agregado;
+- **no se activa** con varios segmentos (`[1,2]`, `[1,2,3]`) en ninguna petición — es la
+  comprobación que garantiza que no se publica un periodo bajo el nombre de otro;
+- **no se activa** en configuraciones raras (sólo existe la parte 2 o la 3) ni en otras familias
+  de periodo (`IS`, `FULL`, `OOS2`).
+
 ### ✅ Compilación
 
 Compila limpio contra los jars reales de SQX con el `javac` de la propia instalación, sin
@@ -42,11 +53,24 @@ errores ni avisos.
 
 ## Pendiente (requiere SQX)
 
+### 0. El caso que motivó la v1.02: OOS y OOS1 coherentes
+
+Sobre `Retester / MonkeyTest` con `period = OOS`, las columnas **Monkey Test de OOS y de OOS1
+deben mostrar ahora el mismo valor**, ninguna en `N/A`. En el log, la línea de resumen de cada
+estrategia debe terminar en `-> PASSED (also published as _OOS1)`.
+
+Repetir con `period = OOS1`: mismo resultado, ambas columnas pobladas y coincidentes.
+
+**Regresión crítica del mismo cambio**: sobre un proyecto con **varios** segmentos OOS
+(`EURUSD H4 - Iterator Edge`), lanzar con `period = OOS2` y confirmar que la columna de `OOS`
+sigue en `N/A`, y con `period = OOS` que la de `OOS1` sigue en `N/A`. El alias no debe aparecer en
+el log en ninguna de las dos. Es lo que garantiza que no se está sustituyendo un periodo por otro.
+
 ### 1. Ejecución con el nuevo build
 
 `EURUSD H4 - Iterator Edge` / `SynthTestFiltered - OOS`, argumentos `500,70,OOS2,AutoDiscard,Debug`.
 
-En `MonkeyTest_ATR_v1_01_debug.log` comprobar:
+En `MonkeyTest_ATR_v1_02_debug.log` comprobar:
 
 - **A1 · A2 · A3 · A4 PASS** en la cabecera del bloque `LAYOUT`, sin ningún `WARN` de invariante
   en el log de SQX.
@@ -92,7 +116,15 @@ Repetir sobre un instrumento con deriva secular (oro, un índice a largo plazo) 
 ahí sí aparecen divergencias sistemáticas de ranking frente al test monetario, concentradas en
 estrategias cuyas operaciones se agrupan en el tramo de precios altos.
 
-### 8. CVSintetica intacta
+### 8. Pendiente de fondo: ¿aplica la equivalencia también a ISV?
+
+La familia `ISV` / `ISV1..10` tiene la misma forma que la de OOS, pero el alias **no** se le
+aplica porque no está comprobado que SQX copie sus estadísticas igual (ver §5.17 de la
+documentación). El día que haya un proyecto con ISV real: lanzar con `period = ISV` sobre una
+estrategia de segmento único y mirar si SQX puebla también `ISV1` con las mismas stats. Si lo
+hace, la equivalencia es válida y conviene extender el alias; si no, hay que dejarlo como está.
+
+### 9. CVSintetica intacta
 
 Su `PassRateAgainstMonkeys` debe seguir leyendo las claves del test monetario sin verse afectada.
 No se tocó ese fichero, así que el riesgo es nulo, pero conviene confirmarlo.
@@ -101,6 +133,6 @@ No se tocó ese fichero, así que el riesgo es nulo, pero conviene confirmarlo.
 
 ## Nota sobre el cambio de nombre
 
-Al pasar a v1.01, SQX deja de mostrar `MonkeyTest_ATR_v1_00` en el desplegable de Custom
-Analysis: hay que **volver a seleccionar `MonkeyTest_ATR_v1_01`** en la configuración de la
+Al pasar a v1.02, SQX deja de mostrar `MonkeyTest_ATR_v1_00` en el desplegable de Custom
+Analysis: hay que **volver a seleccionar `MonkeyTest_ATR_v1_02`** en la configuración de la
 tarea. Si siguiera apareciendo la entrada antigua, reiniciar SQX para forzar la recompilación.

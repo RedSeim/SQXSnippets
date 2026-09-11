@@ -1,8 +1,8 @@
-# Monkey Test ATR v1.01 - Snippet de Custom Analysis
+# Monkey Test ATR v1.02 - Snippet de Custom Analysis
 
 Un test de Permutación Monte Carlo para StrategyQuant X (SQX) que mide el **edge geométrico** de una estrategia — su capacidad de anticipar desplazamiento de precio por unidad de exposición — comparándolo contra el azar, sin convertir nunca a dinero.
 
-> ⚠️ **Los resultados de la v1.01 no son comparables con los de la v1.00.** Los monos de esta versión barajan su secuencia de direcciones y replican la exposición de cada sentido por separado, así que la distribución de referencia es distinta —y más exigente— que la de la versión anterior. Percentiles y Z-Scores calculados con v1.00 deben recalcularse; no tiene sentido mezclarlos en la misma tabla. El motivo de ambos cambios está en [5.15](#515-la-secuencia-de-direcciones-se-baraja-en-cada-mono) y [5.16](#516-la-exposición-se-replica-por-dirección-no-sólo-en-total).
+> ⚠️ **Los resultados de la v1.02 no son comparables con los de la v1.00.** Los monos de esta versión barajan su secuencia de direcciones y replican la exposición de cada sentido por separado, así que la distribución de referencia es distinta —y más exigente— que la de la versión anterior. Percentiles y Z-Scores calculados con v1.00 deben recalcularse; no tiene sentido mezclarlos en la misma tabla. El motivo de ambos cambios está en [5.15](#515-la-secuencia-de-direcciones-se-baraja-en-cada-mono) y [5.16](#516-la-exposición-se-replica-por-dirección-no-sólo-en-total).
 
 ---
 
@@ -103,7 +103,8 @@ Aplica el periodo seleccionado (`FULL`, `IS`, `OOS`, `ISV`, o segmentos numerado
 
 * Si el periodo seleccionado no contiene operaciones, la estrategia se marca como `LOW TRADES`.
 * Si se especifica un segmento numerado inexistente (p. ej. `OOS3` cuando sólo existen 2 segmentos OOS), se marca como `FAILED (INVALID PERIOD)`.
-* **`FULL` también evalúa cada periodo por separado.** Además del agregado, sondea `IS`, `OOS`, `ISV` y cada segmento existente `OOS1..10` / `ISV1..10`, ejecutando el test de forma independiente sobre cada uno. Esto **no** multiplica el coste por el número de periodos: cada periodo sólo simula sus propias operaciones. Cuando la estrategia tiene un único segmento OOS, `OOS` y `OOS1` son el mismo periodo (SQX copia sus estadísticas), así que se simula una vez y se publica bajo ambos sufijos.
+* **`FULL` también evalúa cada periodo por separado.** Además del agregado, sondea `IS`, `OOS`, `ISV` y cada segmento existente `OOS1..10` / `ISV1..10`, ejecutando el test de forma independiente sobre cada uno. Esto **no** multiplica el coste por el número de periodos: cada periodo sólo simula sus propias operaciones.
+* **Con un único segmento OOS, `OOS` y `OOS1` son el mismo periodo** — SQX copia las estadísticas de uno sobre el otro. En ese caso el test se simula una sola vez y **el resultado se publica bajo los dos sufijos**, así que las columnas de OOS y de OOS1 muestran lo mismo. Da igual cómo hayas pedido el periodo: sirve tanto si lanzas con `FULL`, como con `OOS`, como con `OOS1`. Cuando la estrategia sí tiene varios segmentos OOS, el agregado y cada parte numerada son periodos distintos y **nunca** se publican cruzados.
 
 ### 2.3. Calcula el ATR
 
@@ -211,12 +212,12 @@ Compara `edgeReal` frente a la distribución de los N monos. Si supera el umbral
 
 1. Añade una tarea de **Custom Analysis** a tu proyecto.
 2. En **Analysis type**, selecciona **Per Strategy Analysis** (esto habilita el cómputo multihilo usando todos los núcleos de CPU disponibles).
-3. Selecciona **MonkeyTest_ATR_v1_01** como método de análisis en el desplegable.
+3. Selecciona **MonkeyTest_ATR_v1_02** como método de análisis en el desplegable.
 4. En el campo **Input Args**, configura tus parámetros como una cadena separada por comas: `numMonkeys,percentile,period`, más las palabras clave opcionales que necesites.
 
 #### 2. Pestañas de Ranking y Retests del Builder
 
-Como el snippet usa la firma `Per Strategy Analysis`, también puedes seleccionar **MonkeyTest_ATR_v1_01** en el desplegable de filtro de **Custom Analysis** en:
+Como el snippet usa la firma `Per Strategy Analysis`, también puedes seleccionar **MonkeyTest_ATR_v1_02** en el desplegable de filtro de **Custom Analysis** en:
 
 * La pestaña **Ranking** de la configuración de Builder/Genético (para descartar estrategias automáticamente durante la generación).
 * La configuración de **Retests** (para descartar estrategias tras retestearlas sobre datos nuevos).
@@ -227,7 +228,7 @@ Como el snippet usa la firma `Per Strategy Analysis`, también puedes selecciona
 | :--- | :--- | :--- | :--- |
 | **numMonkeys** | `500` | El número de simulaciones aleatorizadas de monos a ejecutar por estrategia. | `1000` |
 | **percentile** | `95.0` | El umbral de confianza estadística. La estrategia debe superar este porcentaje de ejecuciones de monos para pasar. | `70.0` |
-| **period** | `FULL` | Ventana muestral donde se ejecuta el test: `FULL` (backtest completo — **y además cada periodo por separado**), `IS`, `OOS`, `ISV`, o sub-periodos numerados (`OOS1`..`OOS10`, `ISV1`..`ISV10`). Este valor también decide qué periodo determina el veredicto PASSED/FAILED. | `OOS2` |
+| **period** | `FULL` | Ventana muestral donde se ejecuta el test: `FULL` (backtest completo — **y además cada periodo por separado**), `IS`, `OOS`, `ISV`, o sub-periodos numerados (`OOS1`..`OOS10`, `ISV1`..`ISV10`). Este valor también decide qué periodo determina el veredicto PASSED/FAILED. Si la estrategia tiene un único segmento OOS, `OOS` y `OOS1` son intercambiables: pidas el que pidas, el resultado aparece en las dos columnas ([2.2](#22-filtra-por-periodo-muestral)). | `OOS2` |
 | **ATRPeriod=N** | `14` | Palabra clave opcional, no posicional. Periodo del ATR usado para normalizar. No hay que tocarlo en el uso normal: existe para poder comprobar que el ranking no depende críticamente del periodo elegido. Debe ser ≥ 2. | `500,70,OOS2,ATRPeriod=50` |
 | **AutoDiscard** | *(ausente)* | Palabra clave opcional, detectada como subcadena sin distinguir mayúsculas en cualquier punto de la cadena. Controla si `filterStrategy` puede indicarle al motor de SQX que excluya la estrategia cuando el test falla. **Ausente por defecto: ninguna estrategia se excluye nunca**, sea PASSED o FAILED. | `500,70,OOS2,AutoDiscard` |
 | **Precision=M1** / **M1** | *(ausente: timeframe principal)* | Palabra clave opcional. Ejecuta la simulación sobre datos de velas de 1 minuto, lo que aumenta la resolución con la que se replica la duración. **No afecta a la escala del ATR** ([2.6](#26-precisión-y-escala-del-atr)). Si los datos de 1 minuto no están disponibles, se emite una advertencia y se vuelve al timeframe principal. | `500,70,FULL,Precision=M1` |
@@ -303,6 +304,8 @@ Sufijos válidos: `_IS`, `_OOS`, `_ISV`, `_OOS1`..`_OOS10`, `_ISV1`..`_ISV10`, `
 
 Las columnas resuelven el sufijo automáticamente a partir del **selector de sample type del Databank**. La resolución es **estricta**: si un periodo no se ha evaluado, la columna muestra `N/A` en vez de caer al valor de otro periodo. Las claves numéricas sólo se escriben cuando el test se completó, de modo que un `LOW TRADES` muestra `N/A` y nunca un engañoso `0.00`.
 
+> Con un único segmento OOS verás el mismo resultado duplicado bajo `_OOS` y `_OOS1`. **No es un error**: son el mismo tramo, y publicarlo bajo ambos sufijos es lo que evita que una de las dos columnas quede en `N/A` ([2.2](#22-filtra-por-periodo-muestral)).
+
 > **Los valores absolutos no son comparables entre ejecuciones con `ATRPeriod` distinto**: un ATR más largo es típicamente mayor, así que el mismo desplazamiento produce menos "ATRs capturados". El percentil y el Z-Score sí siguen siendo comparables, porque ambos lados de la comparación usan el mismo denominador. Por eso el periodo empleado se publica como clave.
 
 ### Estados de la columna Monkey Test
@@ -352,7 +355,7 @@ Corren en todos los monos y no sólo con `Debug` activo a propósito: si sólo s
 
 ### Volcado de diagnóstico (`Debug`)
 
-Con la palabra clave `Debug` se escribe `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_ATR_v1_01_debug.log`, en dos bloques por periodo:
+Con la palabra clave `Debug` se escribe `user/extend/Snippets/SQ/CustomAnalysis/MonkeyTest_ATR_v1_02_debug.log`, en dos bloques por periodo:
 
 1. **`ATR STATS`** — de dónde sale el edge y en qué régimen de volatilidad: número de operaciones, edge total y por operación, suma de valores absolutos, ATR mínimo/mediano/máximo en las entradas, **cuántas entradas tocaron el suelo de un tick** (distinto de cero significa velas rellenadas o corruptas), spread aplicado, y la **correlación entre el ATR de entrada y el desplazamiento normalizado** sobre las operaciones reales. Esa correlación es diagnóstica: un valor alto en valor absoluto avisa de que el edge se concentra en un régimen de volatilidad concreto, que es justo el caso en que extrapolar a la fase 2 es menos fiable.
 
@@ -487,6 +490,16 @@ Eso es exactamente el tipo de ventaja dependiente del régimen de mercado —no 
 
 > Un efecto secundario que conviene conocer: al separar las bolsas, una dirección con operaciones muy breves puede saturar su duración base a una barra e inflar su exposición, aunque la media global no lo hiciera. El volcado `Debug` lo marca como `[CLAMPED to 1 bar]` en la línea de esa dirección.
 
+### 5.17. La columna nunca cae a otro periodo; el alias OOS ≡ OOS1 es la única excepción, y no es un fallback
+
+Cuando un periodo no se ha evaluado, la columna muestra `N/A` **a propósito**. Podría parecer más cómodo que enseñara el valor de otro periodo cercano, pero eso hacía que todas las columnas acabaran mostrando el mismo número sin que nada lo indicara — un resultado de IS presentado como si fuera de OOS. La resolución estricta es lo que garantiza que lo que ves en una columna se calculó sobre ese periodo y no sobre otro.
+
+La única equivalencia admitida es distinta en naturaleza: **cuando la estrategia tiene un solo segmento OOS, el OOS agregado y OOS1 no son dos periodos parecidos, son literalmente el mismo tramo** — SQX copia las estadísticas de uno sobre el otro. Ahí no se está sustituyendo nada: se publica un mismo resultado bajo los dos nombres que ese mismo tramo recibe. Si la estrategia tiene varios segmentos, la equivalencia deja de ser cierta y el alias no se aplica.
+
+**Por qué se aplica también al pedir el periodo directamente**: la comprobación vive donde se decide qué periodos calcular, no dentro de la rama de `FULL`. Antes sólo se hacía al pedir `FULL`, de modo que lanzar con `OOS` dejaba la columna de OOS1 en `N/A` pese a haber calculado exactamente ese tramo — un `N/A` que parecía un fallo del test cuando en realidad era una clave que nunca se escribió.
+
+**Por qué no se extiende a ISV**: la familia `ISV` / `ISV1..10` tiene la misma forma, pero que SQX copie sus estadísticas igual que con OOS es una suposición que no se ha comprobado. Publicar un resultado bajo un sufijo apoyándose en una equivalencia sin verificar es exactamente lo que el párrafo anterior prohíbe, así que se deja fuera hasta poder confirmarlo sobre un proyecto con ISV real.
+
 ---
 
 ## 6. Relación con el test monetario complementario
@@ -495,7 +508,7 @@ Este proyecto incluye un segundo Monkey Test, `MonkeyTest_v2_00`, que responde a
 
 Los dos conviven y son complementarios: éste para la fase 1 (reglas puras, donde el lotaje es un artefacto técnico), el monetario para validar estrategias completas una vez tienen su gestión de riesgo real.
 
-| Aspecto | Test monetario (`MonkeyTest_v2_00`) | Este test (`MonkeyTest_ATR_v1_01`) |
+| Aspecto | Test monetario (`MonkeyTest_v2_00`) | Este test (`MonkeyTest_ATR_v1_02`) |
 | :--- | :--- | :--- |
 | Magnitud medida | Beneficio en dinero | Desplazamiento normalizado por ATR (adimensional) |
 | Tratamiento del money management | Dos fórmulas distintas, según el lotaje sea fijo o variable | Una sola: el money management no interviene |

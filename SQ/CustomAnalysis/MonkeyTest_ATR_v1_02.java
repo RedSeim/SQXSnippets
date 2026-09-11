@@ -15,7 +15,7 @@ import com.strategyquant.datalib.data.io.newDataFormat.OhlcDataReader;
 import com.strategyquant.datalib.data.io.VersatileData;
 
 /**
- * Monkey Test ATR v1.01 -- Monte Carlo permutation test del EDGE GEOMETRICO de una estrategia.
+ * Monkey Test ATR v1.02 -- Monte Carlo permutation test del EDGE GEOMETRICO de una estrategia.
  *
  * A diferencia de MonkeyTest_v2_00, que mide el edge en dinero calibrando un ratio K, esta version
  * NO convierte nunca a dinero: mide el desplazamiento de precio de cada operacion NORMALIZADO POR EL
@@ -29,10 +29,10 @@ import com.strategyquant.datalib.data.io.VersatileData;
  * Al no tocar cuantias monetarias desaparece la necesidad de distinguir MODO A y MODO B: el money
  * management solo hacia falta para convertir desplazamiento en euros.
  *
- * Las decisiones de diseno y su justificacion estan en MonkeyTest_ATR_v1_01_ENG.md / _SPA.md.
+ * Las decisiones de diseno y su justificacion estan en MonkeyTest_ATR_v1_02_ENG.md / _SPA.md.
  */
-public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
-    public static final Logger Log = LoggerFactory.getLogger(MonkeyTest_ATR_v1_01.class);
+public class MonkeyTest_ATR_v1_02 extends CustomAnalysisMethod {
+    public static final Logger Log = LoggerFactory.getLogger(MonkeyTest_ATR_v1_02.class);
 
     private static final int MAX_PARTS = 10;
     private static final int MIN_TRADES = 20;
@@ -42,7 +42,7 @@ public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
     // SQX (el working directory de la JVM), igual que el cacheDir del ResultsPlugin, de modo que
     // sigue siendo valida tras reinstalar o mover SQX. Mismo patron que CVSintetica_V08.logDebug.
     private static final String DEBUG_LOG_DIR = "user/extend/Snippets/SQ/CustomAnalysis";
-    private static final String DEBUG_LOG_NAME = "MonkeyTest_ATR_v1_01_debug.log";
+    private static final String DEBUG_LOG_NAME = "MonkeyTest_ATR_v1_02_debug.log";
     private static boolean debugWriteErrorReported = false;
 
     /** Claves publicadas por periodo. Se limpian antes de recalcular cada periodo en scope. */
@@ -172,8 +172,8 @@ public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
         double atrEdgeCorrelation;
     }
 
-    public MonkeyTest_ATR_v1_01() {
-        super("MonkeyTest_ATR_v1_01", TYPE_FILTER_STRATEGY);
+    public MonkeyTest_ATR_v1_02() {
+        super("MonkeyTest_ATR_v1_02", TYPE_FILTER_STRATEGY);
     }
 
     @Override
@@ -667,6 +667,10 @@ public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
         ArrayList<PeriodDef> list = new ArrayList<>();
 
         if (requested.sampleType != SampleTypes.FullSample) {
+            // Pedir un periodo concreto tambien tiene que respetar la equivalencia OOS == OOS1
+            // cuando solo hay un segmento; si no, la columna del sufijo no pedido queda en N/A
+            // pese a que ese mismo tramo si se ha calculado.
+            applySingleOosAlias(rg, mainResultKey, requested);
             list.add(requested);
             return list;
         }
@@ -677,15 +681,11 @@ public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
             list.add(new PeriodDef(SampleTypes.InSample, "_IS"));
         }
 
-        ArrayList<Integer> oosParts = new ArrayList<>();
-        for (int n = 1; n <= MAX_PARTS; n++) {
-            if (hasOrders(rg, mainResultKey, (byte) (SampleTypes.OutOfSample + n))) {
-                oosParts.add(n);
-            }
-        }
         // Con una sola parte OOS, SQX copia sus stats sobre el OOS agregado: son el mismo periodo.
-        // Se simula una vez y se publica bajo ambos sufijos.
-        boolean singleOosPart = oosParts.size() == 1 && oosParts.get(0) == 1;
+        // Se simula una vez y se publica bajo ambos sufijos. Cuenta como unico tanto si la unica
+        // parte poblada es la 1 como si no hay ninguna y solo existe el agregado.
+        ArrayList<Integer> oosParts = numberedOosParts(rg, mainResultKey);
+        boolean singleOosPart = isSingleOosSegment(oosParts);
 
         if (hasOrders(rg, mainResultKey, SampleTypes.OutOfSample)) {
             PeriodDef oos = new PeriodDef(SampleTypes.OutOfSample, "_OOS");
@@ -710,6 +710,48 @@ public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
         }
 
         return list;
+    }
+
+    /** Partes numeradas de la familia OOS que tienen operaciones en esta estrategia. */
+    private ArrayList<Integer> numberedOosParts(ResultsGroup rg, String mainResultKey) {
+        ArrayList<Integer> parts = new ArrayList<>();
+        for (int n = 1; n <= MAX_PARTS; n++) {
+            if (hasOrders(rg, mainResultKey, (byte) (SampleTypes.OutOfSample + n))) {
+                parts.add(n);
+            }
+        }
+        return parts;
+    }
+
+    /**
+     * Con un solo segmento OOS, el agregado y OOS1 son literalmente el mismo tramo: SQX copia las
+     * stats de uno sobre el otro. Cuenta como segmento unico tanto si la unica parte numerada es la
+     * 1 como si no hay ninguna poblada y solo existe el agregado -- el mismo criterio que ya aplica
+     * resolveOrders para admitir las ordenes agregadas cuando se pide OOS1.
+     */
+    private boolean isSingleOosSegment(ArrayList<Integer> oosParts) {
+        return oosParts.isEmpty() || (oosParts.size() == 1 && oosParts.get(0) == 1);
+    }
+
+    /**
+     * Marca el sufijo adicional bajo el que publicar cuando el periodo pedido es un OOS de segmento
+     * unico, para que la columna del otro sufijo no muestre N/A pese a tratarse del mismo tramo ya
+     * calculado. Sin esto, pedir "OOS" dejaba la columna OOS1 vacia y viceversa.
+     *
+     * OJO: muta el PeriodDef recibido. Es seguro porque 'requested' es una variable LOCAL de
+     * filterStrategy y parsePeriod devuelve un objeto nuevo en cada rama, asi que cada estrategia
+     * trabaja con el suyo. Si algun dia se subiera 'requested' a campo de la clase, este alias se
+     * filtraria entre estrategias en la ejecucion multihilo y publicaria el OOS agregado de una
+     * estrategia bajo el OOS1 de otra que si tiene varios segmentos.
+     */
+    private void applySingleOosAlias(ResultsGroup rg, String mainResultKey, PeriodDef pd) {
+        if (pd.sampleType != SampleTypes.OutOfSample && pd.sampleType != SampleTypes.OutOfSample1) {
+            return;
+        }
+        if (!isSingleOosSegment(numberedOosParts(rg, mainResultKey))) {
+            return;
+        }
+        pd.alsoPublishAs = (pd.sampleType == SampleTypes.OutOfSample) ? "_OOS1" : "_OOS";
     }
 
     private boolean hasOrders(ResultsGroup rg, String mainResultKey, byte sampleType) {
@@ -1230,7 +1272,8 @@ public class MonkeyTest_ATR_v1_01 extends CustomAnalysisMethod {
                 + " edge/trade=" + String.format(java.util.Locale.US, "%.4f", res.edgePerTrade)
                 + " monkeyMedian=" + String.format(java.util.Locale.US, "%.4f", medianMonkey)
                 + " atrFloorHits=" + realFloorHits
-                + " -> " + res.status);
+                + " -> " + res.status
+                + (pd.alsoPublishAs != null ? " (also published as " + pd.alsoPublishAs + ")" : ""));
 
         } catch (Exception e) {
             res.status = "ERROR";
